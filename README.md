@@ -90,6 +90,8 @@ params = fit_curve(
 
 `params` contains the fitted parameters. Since it is not guaranteed to get convergence, we suggest to wrap it in a `try ... except`.
 
+**Troubleshooting non-convergence**: Increase `max_iterations`, choose suitable initial values, and/or address potential outliers.
+
 To calculate the area under the curve, one can use numpy's `trapezoid` method:
 
 ```
