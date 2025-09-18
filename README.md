@@ -33,13 +33,22 @@ ll_max = calculate_pointwise_line_length_max(
 )
 ```
 
+For longitudinal studies comparing excitability across different brain states, a baseline correction can be applied: the mean line-length value in a pre-stimulation window is subtracted from all line-length values. This ensures that stimulation-response curves start at a comparable low level across brain states without requiring normalization.
+
+```
+ll_baseline = calculate_ll_baseline(data=epochs, offset_stim_seconds=1, f_sample=f_sample)
+
+ll_max = ll_max - ll_baseline
+
+```
+
 To get a single value per intensity, we used the median to be more robust against outliers:
 
 ```
 ll_med = np.nanmedian(ll_max, axis=1)
 ```
 
-To normalize the SRCs, we normalized the intensities using `intensities/np.max(intensities)` and the line-length values using `normalize_ll_values(..., use_min=True)` method provided in `analyze.py`.
+To normalize the SRCs, we normalized the intensities using `intensities/np.max(intensities)` and the line-length values using `normalize_ll_values(..., min=0)` (or `normalize_ll_values(..., use_min=True)` without baseline correction) method provided in `analyze.py`.
 
 #### 2. Connection significance
 
