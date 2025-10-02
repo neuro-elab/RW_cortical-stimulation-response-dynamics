@@ -29,7 +29,10 @@ CURVES = {
         ),
         "param_names": ["upper_plateau", "inflection_point", "steepness"],
         "initial_values": [1, 0.4, 5],
-        "bounds": None,
+        "bounds": (
+            [0, -np.inf, -np.inf],
+            [np.inf, np.inf, np.inf],
+        ),
     },
     "4P": {
         # classic sigmoid
@@ -46,7 +49,10 @@ CURVES = {
             "steepness",
         ],
         "initial_values": [1, 0.3, 0.4, 5],
-        "bounds": None,
+        "bounds": (
+            [0, 0, -np.inf, -np.inf],
+            [1, np.inf, np.inf, np.inf],
+        ),
     },
     "5P": {
         # 5 parameter model
@@ -65,8 +71,8 @@ CURVES = {
         ],
         "initial_values": [0.3, 1, 0.35, 15, 10],
         "bounds": (
-            [-np.inf, -np.inf, -np.inf, 0, 0.01],
-            [np.inf, np.inf, np.inf, 200, 200],
+            [0, 0, -np.inf, 0, 0.01],
+            [1, np.inf, np.inf, 200, 200],
         ),
     },
 }
