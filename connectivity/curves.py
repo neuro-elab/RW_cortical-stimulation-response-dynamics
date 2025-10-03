@@ -34,21 +34,21 @@ CURVES = {
             [np.inf, np.inf, np.inf],
         ),
     },
-    "4P": {
+     "4P": {
         # classic sigmoid
         "name": "4P",
-        "function": lambda x, upper_plateau, lower_plateau, inflection_point, steepness: lower_plateau
+        "function": lambda x, lower_plateau, upper_plateau, inflection_point, steepness: lower_plateau
         + (
             (upper_plateau - lower_plateau)
             / (1 + np.exp(-steepness * (x - inflection_point)))
         ),
         "param_names": [
-            "upper_plateau",
             "lower_plateau",
+            "upper_plateau",
             "inflection_point",
             "steepness",
         ],
-        "initial_values": [1, 0.3, 0.4, 5],
+        "initial_values": [0.3, 1, 0.4, 5],
         "bounds": (
             [0, 0, -np.inf, -np.inf],
             [1, np.inf, np.inf, np.inf],
