@@ -11,6 +11,7 @@ import scipy
 import multiprocessing as mp
 
 
+from connectivity.curves import Curve
 from connectivity.load import (
     MultipleHDFResponseLoader,
 )
@@ -103,7 +104,10 @@ def calculate_line_length(continuous_ll: np.ndarray, start_index: int, end_index
 
 
 def calculate_pointwise_line_length_max(
-    data: np.ndarray, offset_stim_seconds: float, f_sample: int
+    data: np.ndarray,
+    offset_stim_seconds: float,
+    f_sample: int,
+    window_width_seconds: float = 0.25,
 ):
     """
     Calculate the line-length measure for multidimensional data using the max + continuous method.
@@ -126,14 +130,14 @@ def calculate_pointwise_line_length_max(
     """
     start_index_cll = round(offset_stim_seconds * f_sample)
     end_index_cll = round((offset_stim_seconds + 2) * f_sample)
-    start_index_ll = round(0.25 * f_sample)
+    start_index_ll = round(window_width_seconds * f_sample)
     end_index_ll = round(0.5 * f_sample)
 
     cont_ll = calculate_continuous_line_length(
         data=data,
         start_index=start_index_cll,
         end_index=end_index_cll,
-        window_width_indices=round(0.25 * f_sample),
+        window_width_indices=round(window_width_seconds * f_sample),
         f_sample=f_sample,
     )
     single_ll = calculate_line_length(
@@ -187,7 +191,9 @@ def calculate_pointwise_line_length(
     return ll
 
 
-def calculate_ll_baseline(data, offset_stim_seconds, f_sample):
+def calculate_ll_baseline(
+    data, offset_stim_seconds, f_sample, window_width_seconds=0.25
+):
     start_index_cll = 0
     end_index_cll = round((offset_stim_seconds) * f_sample)
     start_index_ll = round((-0.6 + offset_stim_seconds) * f_sample)
@@ -197,7 +203,7 @@ def calculate_ll_baseline(data, offset_stim_seconds, f_sample):
         data=data,
         start_index=start_index_cll,
         end_index=end_index_cll,
-        window_width_indices=round(0.25 * f_sample),
+        window_width_indices=round(window_width_seconds * f_sample),
         f_sample=f_sample,
     )  # shape: (n_intensities, [n_replications], n_response_channels, n_time)
 
@@ -221,8 +227,8 @@ def calculate_stimulation_response_curves(
     protocol: str = "CR",
     no_traces: bool = False,
     exclude_responses: bool = False,
+    window_width_seconds: float = 0.25,
 ):
-    #### FIXME calculates avg LL with average first
     assert len(selected_channel_paths) > 0
 
     ll_values = []
@@ -275,13 +281,16 @@ def calculate_stimulation_response_curves(
 
         # calculate ll on single trial basis
         single_ll = calculate_pointwise_line_length_max(
-            data=res, offset_stim_seconds=1, f_sample=response_loader.f_sample
+            data=res,
+            offset_stim_seconds=1,
+            f_sample=response_loader.f_sample,
+            window_width_seconds=window_width_seconds,
         )
         ll_values.append(single_ll)
 
     max_replications = np.max(n_replications_list)
 
-    # 0mA componen
+    # 0mA component
     if selected_intensities[0] == 0:
         # pick max_replication stimulations
         subset_io_stimlist = io_stimlist.sample(
@@ -689,6 +698,74 @@ def calculate_excitability_index():
     pass  # TODO
 
 
+def fallback_fit_curve(
+    main_curve: Curve,
+    fallback_curve: Curve,
+    x: np.ndarray,
+    y: np.ndarray,
+    loss: str = None,
+    max_iterations: int = 5000,
+    main_initial_values: list = None,
+):
+    try:
+        params, full_nfev = fit_curve(
+            curve_function=main_curve["function"],
+            x=x,
+            y=y,
+            initial_values=main_curve["initial_values"],
+            bounds=main_curve["bounds"],
+            loss=loss,
+            full_output=True,
+            max_iterations=max_iterations,
+        )
+        return params, full_nfev
+    except Exception:
+        # Use fall back curve to calculate better initial values
+        try:
+            fallback_params, nfev_fallback = fit_curve(
+                curve_function=fallback_curve["function"],
+                x=x,
+                y=y,
+                initial_values=fallback_curve["initial_values"],
+                bounds=fallback_curve["bounds"],
+                loss=loss,
+                full_output=True,
+                max_iterations=max_iterations,
+            )
+            improved_initial_values = []
+            for param_name in main_curve["param_names"]:
+                if param_name in fallback_curve["param_names"]:
+                    # take from fallback if available
+                    index = fallback_curve["param_names"].index(param_name)
+                    improved_initial_values.append(fallback_params[index])
+                else:
+                    # take static value from main curve if not available in fallback
+                    index = main_curve["param_names"].index(param_name)
+                    if main_initial_values is not None:
+                        improved_initial_values.append(main_initial_values[param_name])
+                    else:
+                        improved_initial_values.append(
+                            main_curve["initial_values"][index]
+                        )
+            params, nfev = fit_curve(
+                curve_function=main_curve["function"],
+                x=x,
+                y=y,
+                initial_values=improved_initial_values,
+                bounds=main_curve["bounds"],
+                loss=loss,
+                full_output=True,
+                max_iterations=max_iterations,
+            )
+            print("Info: Fallback fitting succeeded.")
+            nfev = nfev + nfev_fallback
+            return params, nfev
+
+        except Exception as fallback_e:
+            print("Warning: Fallback fitting also failed.")
+            raise fallback_e
+
+
 def fit_curve(
     curve_function: callable,
     x: np.ndarray,
@@ -842,7 +919,7 @@ def _bootstrap_curve_fitting_worker(args):
             max_iterations=max_optimizer_iterations,
         )
         return params
-    except RuntimeError as e:
+    except Exception as e:
         # print(f"Warning in bootstrap iteration {i}: {e}")
         return None
 
@@ -861,6 +938,7 @@ def subset_bootstrap_curve_fitting(
     normalize: bool = False,
     shared_normalization_min: float = None,
     shared_normalization_max: float = None,
+    with_replacement: bool = True,
 ):
     rng_seed = np.random.randint(0, 1_000_000)
 
@@ -880,6 +958,7 @@ def subset_bootstrap_curve_fitting(
                 normalize,
                 shared_normalization_min,
                 shared_normalization_max,
+                with_replacement,
             )
             for i in range(n_bootstrap)
         ]
@@ -904,6 +983,7 @@ def subset_bootstrap_curve_fitting(
                 normalize,
                 shared_normalization_min,
                 shared_normalization_max,
+                with_replacement,
             )
             res = _subset_bootstrap_curve_fitting_worker(args)
             if res is not None:
@@ -927,6 +1007,7 @@ def _subset_bootstrap_curve_fitting_worker(args):
         normalize,
         shared_normalization_min,
         shared_normalization_max,
+        with_replacement,
     ) = args
 
     np.random.seed(rng_seed + i)
@@ -942,9 +1023,9 @@ def _subset_bootstrap_curve_fitting_worker(args):
             y_boot_list.append(np.full(n_subset_replications, 0))
             continue
 
-        selected_indices = np.random.choice(  # FIXME
-            valid_indices, size=n_subset_replications, replace=True
-        )  # replacement is False, we do "Subsampling" here
+        selected_indices = np.random.choice(
+            valid_indices, size=n_subset_replications, replace=with_replacement
+        )  # replacement is False, we do "Subsampling" here, otherwise "Subset Bootstrap"
 
         y_boot_list.append(y[intensity_index, selected_indices])
 
@@ -969,7 +1050,7 @@ def _subset_bootstrap_curve_fitting_worker(args):
             max_iterations=max_optimizer_iterations,
         )
         return params
-    except RuntimeError as e:
+    except Exception as e:
         # print(f"Warning in bootstrap iteration {i}: {e}")
         return None
 
@@ -1469,6 +1550,8 @@ def find_max_n_replications(
 
     if stim_protocol == "CR_IO":
         group_by = ["Int_prob", "name_pos", "name_neg"]
+    elif stim_protocol == "Ph_IO":
+        group_by = ["Int_prob", "name_pos", "name_neg"]
     else:
         print("Warning: Unknown stimulation protocol. Using default grouping.")
         group_by = ["name_pos", "name_neg"]
@@ -1490,6 +1573,10 @@ def calculate_model_performance(y, y_pred, num_params):
 
     # source: https://en.wikipedia.org/wiki/Akaike_information_criterion#Comparison_with_least_squares
     delta_aic = 2 * num_params + n_dp * np.log(sum_squared_residuals / n_dp)
+    delta_aicc = delta_aic + (2 * num_params * (num_params + 1)) / (
+        n_dp - num_params - 1
+    )
+    delta_bic = num_params * np.log(n_dp) + n_dp * np.log(sum_squared_residuals / n_dp)
 
     mae = np.mean(np.abs(y - y_pred))
 
@@ -1503,6 +1590,8 @@ def calculate_model_performance(y, y_pred, num_params):
         "MAPE": mape,
         "sMAPE": smape,
         "dAIC": delta_aic,
+        "dAICc": delta_aicc,
+        "dBIC": delta_bic,
     }
 
 
@@ -1707,8 +1796,8 @@ def calculate_peak_latency(traces: np.ndarray, offset_stim_seconds: int, f_sampl
 
     # 1. baseline correct single trials
     baseline_period = [
-        round((offset_stim_seconds - 0.5) * f_sample),
-        int((offset_stim_seconds - 0.00) * f_sample),
+        round((offset_stim_seconds - 0.6) * f_sample),  # EvM uses -0.5, 0
+        int((offset_stim_seconds - 0.1) * f_sample),
     ]
     baseline_median = np.median(
         traces[..., baseline_period[0] : baseline_period[1]], axis=-1
@@ -1718,13 +1807,20 @@ def calculate_peak_latency(traces: np.ndarray, offset_stim_seconds: int, f_sampl
     baseline_corrected_traces = traces - baseline_median
 
     # 2. average signal
-    avg_traces = np.mean(
-        baseline_corrected_traces, axis=(0, 1)
+    reshaped = baseline_corrected_traces.reshape(
+        -1,  # combined intensities and replications
+        baseline_corrected_traces.shape[2],  # n_channels
+        baseline_corrected_traces.shape[3],  # n_time
+    )
+    avg_traces = scipy.stats.trim_mean(
+        reshaped, axis=0, proportiontocut=0.1
     )  # shape (n_channels, n_time) # TODO here we also average across intensities
 
     # 3. Baseline correction: subtract baseline mean and z-score with respect to baseline
-    baseline_avg_mean = np.mean(
-        avg_traces[:, baseline_period[0] : baseline_period[1]], axis=1
+    baseline_avg_mean = scipy.stats.trim_mean(
+        avg_traces[:, baseline_period[0] : baseline_period[1]],
+        axis=1,
+        proportiontocut=0.1,
     )[
         ..., np.newaxis
     ]  # shape (n_channels, 1)
@@ -1773,30 +1869,39 @@ def calculate_peak_latency(traces: np.ndarray, offset_stim_seconds: int, f_sampl
     )(peaks, polarity_atlas)
 
     # Take first peak after stim time
-    target = round(offset_stim_seconds * f_sample)
+    target_start = round((offset_stim_seconds) * f_sample)
+    target_end = round((offset_stim_seconds + 0.5) * f_sample)
 
     # FIXME
     # here we need to restrict to valid part
     # function to reduce one array of peaks to the closest value
-    def first_peak_after(peaks, target):
+    def first_peak_in(peaks, target_start, target_end):
         peaks = np.asarray(peaks)
-        mask = peaks > target
+        mask = (peaks > target_start) & (peaks < target_end)
         if np.any(mask):
             return peaks[np.argmax(mask)]  # first True → first peak > target
         else:
             return -1  # or np.nan, if no peak is bigger
 
-    peak_indices = np.vectorize(lambda p: first_peak_after(p, target), otypes=[object])(
-        sorted_peaks
-    )
+    peak_indices = np.vectorize(
+        lambda p: first_peak_in(p, target_start=target_start, target_end=target_end),
+        otypes=[object],
+    )(sorted_peaks)
     peak_times = np.vectorize(
-        lambda idx: (idx / f_sample) - offset_stim_seconds if idx is not -1 else -1,
+        lambda idx: (idx / f_sample) - offset_stim_seconds if idx != -1 else -1,
         otypes=[object],
     )(peak_indices)
     peak_polarities = np.vectorize(
         lambda p, pol: (
-            pol[np.where(p == first_peak_after(p, target))[0][0]]
-            if first_peak_after(p, target) is not -1
+            pol[
+                np.where(
+                    p
+                    == first_peak_in(
+                        p, target_start=target_start, target_end=target_end
+                    )
+                )[0][0]
+            ]
+            if first_peak_in(p, target_start=target_start, target_end=target_end) != -1
             else 0
         ),
         otypes=[object],
@@ -1844,6 +1949,10 @@ def significant_exi_difference_testing(
             for i in range(n_surrogates)
         ]
 
+        # results = Parallel(n_jobs=-1, backend="threading")(
+        #     delayed(_significant_exi_difference_testing)(args) for args in args_list
+        # )
+
         with mp.Pool(mp.cpu_count()) as pool:
             results = pool.map(_significant_exi_difference_testing, args_list)
         delta_exis_null = [res[0] for res in results]
@@ -1889,7 +1998,7 @@ def significant_exi_difference_testing(
                 # TODO add r_squared requirement
 
                 delta_exis_null.append(np.abs(exi_1 - exi_2))
-            except RuntimeError as e:
+            except Exception as e:
                 pass
 
             delta_empirical_exis_null.append(np.abs(empirical_exi_1 - empirical_exi_2))
@@ -2017,7 +2126,7 @@ def _significant_exi_difference_testing(args):
         exi_1 = np.trapezoid(y_fit_1, x_fit)
         exi_2 = np.trapezoid(y_fit_2, x_fit)
         # TODO add r_squared requirement
-    except RuntimeError as e:
+    except Exception as e:
         exi_1 = np.nan
         exi_2 = np.nan
 

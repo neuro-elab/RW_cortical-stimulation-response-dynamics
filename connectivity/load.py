@@ -357,7 +357,7 @@ class HDFResponseLoader(HDFDataLoader):
                 ].values
                 assert len(candidates_pos) == 1
                 label = candidates_pos[0]
-                if label == "WM":
+                if label == "WM" or label == "Cerebral-White-Matter":
                     # if positive in WM, take negative
                     candidates_neg = self.lookup_channels.loc[
                         self.lookup_channels["name"] == name_neg, "destrieux_corrected"
@@ -831,6 +831,10 @@ class MultipleHDFResponseLoader:
 
         return sorted(filtered_channel_paths)
 
+    def get_bipole_mapping(self):
+
+        return self._response_loaders[0].get_bipole_mapping()
+
     def is_stimulating_channel_path(self, channel_path: str, protocol: str = None):
         return self._response_loaders[0].is_stimulating_channel_path(
             channel_path, protocol=protocol
@@ -1047,6 +1051,10 @@ class MultipleHDFResponseLoader:
         for rl in self._response_loaders:
             rl.close()
 
+    def get_lookup_channels(self):
+        lookup_channels = self._response_loaders[0].get_lookup_channels()
+        return lookup_channels
+
 
 class Atlas:
     def __init__(
@@ -1084,29 +1092,33 @@ def get_h5_names_of_patient(
     base_path: str,
     patient_id: str,
     protocol: str = None,
-    new_overview_format: bool = False,  # deprecated
     only_sleep_graded_and_ok: bool = True,  # only for new format
 ):
     with open(f"{base_path}/overview.json", "r") as json_file:
         overview = json.load(json_file)
 
-    if protocol is not None:
+    if protocol == "CR":
         names_h5 = [
             recording["file"]
             for recording in sorted(
                 [
                     r
-                    for r in (
-                        overview[patient_id]["electrophy"]
-                        if new_overview_format
-                        else overview[patient_id]
-                    )
+                    for r in (overview[patient_id]["electrophy"])
                     if r["protocol"] == protocol
-                    and (
-                        not new_overview_format
-                        or not only_sleep_graded_and_ok
-                        or (r["sleep"] and r["isOk"])
-                    )
+                    and (not only_sleep_graded_and_ok or (r["sleep"] and r["isOk"]))
+                ],
+                key=lambda r: r["block"],
+            )
+        ]
+    elif protocol == "Ph":
+        names_h5 = [
+            recording["file"]
+            for recording in sorted(
+                [
+                    r
+                    for r in (overview[patient_id]["electrophy"])
+                    if r["protocol"] == protocol
+                    and (not only_sleep_graded_and_ok or r["isOk"])
                 ],
                 key=lambda r: r["block"],
             )

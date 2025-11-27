@@ -1,18 +1,40 @@
 import numpy as np
+import scipy
+
+
+# rational one
+# p = expit(z)
+# inv_denom = ((1 - p) / (1 + (shape - 1) * p)) ** (1 / shape)
+# y = upper_plateau + (lower_plateau - upper_plateau) * inv_denom
+
+
+# use named funciton to be able to use in in multiprocessing
+def four_param_sigmoid(x, lower_plateau, upper_plateau, inflection_point, steepness):
+    return lower_plateau + (
+        (upper_plateau - lower_plateau)
+        / (1 + np.exp(-steepness * (x - inflection_point)))
+    )
 
 
 # use named function to be able to use in in multiprocessing
 def five_param_sigmoid(
     x, lower_plateau, upper_plateau, inflection_point, steepness, shape
 ):
-    exponent = steepness * (x - inflection_point)
-    base = 1 + shape * np.exp(exponent)
-    base = np.clip(base, 1e-10, 1e100)  # avoid overflow in power
-    denominator = (base) ** (1 / shape)
-    return upper_plateau + ((lower_plateau - upper_plateau) / denominator)
+
+    z = steepness * (x - inflection_point)
+    # log(1 + shape * e^z) stably
+    log_base = np.logaddexp(0.0, np.log(shape) + z)  # = log(1 + shape*exp(z))
+
+    # inv_denom = exp(-(1/shape) * log_base)  in (0,1]
+    log_inv_denom = -(1.0 / shape) * log_base
+    inv_denom = np.exp(log_inv_denom)  # safe: exponent <= 0
+
+    return upper_plateau + (lower_plateau - upper_plateau) * inv_denom
 
 
-CURVES = {
+Curve = dict[str, object]
+
+CURVES: dict[str, Curve] = {
     "2P": {
         # linear model
         "name": "2P",
@@ -21,7 +43,7 @@ CURVES = {
         "initial_values": [0.2, 1],
         "bounds": None,
     },
-    "3P": {  # TODO check if we need some lower plateau
+    "3P": {
         # 3P sigmoid
         "name": "3P",
         "function": lambda x, upper_plateau, inflection_point, steepness: +(
@@ -34,14 +56,14 @@ CURVES = {
             [np.inf, np.inf, np.inf],
         ),
     },
-     "4P": {
+    "4P": {
         # classic sigmoid
         "name": "4P",
-        "function": lambda x, lower_plateau, upper_plateau, inflection_point, steepness: lower_plateau
-        + (
-            (upper_plateau - lower_plateau)
-            / (1 + np.exp(-steepness * (x - inflection_point)))
-        ),
+        "function": four_param_sigmoid,  # lambda x, lower_plateau, upper_plateau, inflection_point, steepness: lower_plateau
+        # + (
+        #     (upper_plateau - lower_plateau)
+        #     / (1 + np.exp(-steepness * (x - inflection_point)))
+        # ),
         "param_names": [
             "lower_plateau",
             "upper_plateau",
@@ -66,13 +88,13 @@ CURVES = {
             "lower_plateau",
             "upper_plateau",
             "inflection_point",
-            "steepness_raw",
+            "steepness",
             "shape",
         ],
         "initial_values": [0.3, 1, 0.35, 15, 10],
         "bounds": (
             [0, 0, -np.inf, 0, 0.01],
-            [1, np.inf, np.inf, 200, 200],
+            [1, np.inf, np.inf, np.inf, 200],
         ),
     },
 }
