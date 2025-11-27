@@ -99,7 +99,19 @@ params = fit_curve(
 
 `params` contains the fitted parameters. Since it is not guaranteed to get convergence, we suggest to wrap it in a `try ... except`.
 
-**Troubleshooting non-convergence**: Increase `max_iterations`, choose suitable initial values, and/or address potential outliers.
+**Troubleshooting non-convergence**: Increase `max_iterations`, choose suitable initial values, and/or address potential outliers. Using fitted parameters 4P as initial values for the 5P helped to increase convergence. A method is provided in `analyze.py` to implement this fallback fitting:
+
+```
+main_initial_values = {"shape": 1}
+params, nfev = fallback_fit_curve(
+    main_curve=CURVES["5P"],
+    fallback_curve=CURVES["4P"],
+    x=norm_intensities,
+    y=norm_med_ll,
+    max_iterations=1000,
+    main_initial_values=main_initial_values,
+)
+```
 
 To calculate the area under the curve, one can use numpy's `trapezoid` method:
 
