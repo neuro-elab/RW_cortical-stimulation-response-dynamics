@@ -298,14 +298,16 @@ class HDFResponseLoader(HDFDataLoader):
         self,
         times_sec: list[float],
         response_channel_paths: list[str],
-        t_start: int = -4,
-        t_stop: int = 2,
+        t_start: float = -4,
+        t_stop: float = 2,
+        f_sample: int = None,
     ):
         res = []
-        for time in times_sec:
-            start_index = round((time + t_start) * self.f_sample)
-            stop_index = round((time + t_stop) * self.f_sample)
+        f_sample = f_sample if f_sample is not None else self.f_sample
 
+        for time in times_sec:
+            start_index = round((time + t_start) * f_sample)
+            stop_index = round((time + t_stop) * f_sample)
             channels = super().get_data(
                 dataset_paths=response_channel_paths,
                 start_row_index=start_index,
@@ -956,9 +958,10 @@ class MultipleHDFResponseLoader:
         self,
         recording_indices: list[int],
         times_sec: list[float],
-        response_channel_paths: list[str],
-        t_start: int = -4,
-        t_stop: int = 2,
+        response_channel_paths: list[str],  # also monopolar possible
+        t_start: float = -4,
+        t_stop: float = 2,
+        f_sample: int = None,
     ):
         assert len(recording_indices) == len(times_sec)
         index_groups = {}
@@ -976,6 +979,7 @@ class MultipleHDFResponseLoader:
                 response_channel_paths=response_channel_paths,
                 t_start=t_start,
                 t_stop=t_stop,
+                f_sample=f_sample,
             )
             res_list.append(res)
 

@@ -9,11 +9,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import pandas as pd
 
-from connectivity.analyze import (
-    calculate_model_performance,
-    fallback_fit_curve,
-    fit_curve,
-)
+from connectivity.analyze import calculate_model_performance, fit_curve
 
 from connectivity.curves import CURVES
 from connectivity.load import MultipleHDFResponseLoader, get_h5_names_of_patient
@@ -29,18 +25,16 @@ base_path = os.getenv("BASE_PATH_PAPER", "/default/path")
 # patients_id = ["EL022", "EL027", "EL019", "EL026"]  # EL019
 patients_id = [arg for arg in sys.argv[1:]]
 print(f"Patients: {patients_id}")
-out_path = "output/curve_fitting"
+out_path = "output/convergence_analysis"
 response_file = "output/significant_responses/response_channels_lf.json"
+convergence_analysis_file = "output/convergence_analysis/convergence_analysis_lf.json"
 curve_fitting_file = "output/curve_fitting/curve_fitting_lf.json"
 
 
-curves = [CURVES["2P"], CURVES["3P"], CURVES["4P"], CURVES["5P"]]
-MAIN_CURVE_NAME = "5P"
-SECONDARY_CURVE_NAME = "4P"
-
-LOSSES = ["linear"]  # , "soft_l1", "cauchy"]
-R_SQUARED_THRESHOLD = 0.6
+LOSSES = ["linear", "soft_l1"]  # , "cauchy"]
+CURVE = CURVES["5P"]
 MAX_ITERATIONS = 20000
+x_fit = np.linspace(0, 1, 1000)
 
 with open(f"{out_path}/params_{'_'.join(patients_id)}.json", "w") as f:
     json.dump(
@@ -49,12 +43,8 @@ with open(f"{out_path}/params_{'_'.join(patients_id)}.json", "w") as f:
             "n_replications": n_replications,
             "base_path": base_path,
             "patients_id": patients_id,
-            "curves": [curve["name"] for curve in curves],
             "losses": LOSSES,
-            "main_curve": MAIN_CURVE_NAME,
-            "r_squared_threshold": R_SQUARED_THRESHOLD,
             "max_iterations": MAX_ITERATIONS,
-            "secondary_curve": SECONDARY_CURVE_NAME,
         },
         f,
         indent=4,
@@ -63,15 +53,9 @@ with open(f"{out_path}/params_{'_'.join(patients_id)}.json", "w") as f:
 ## LOAD RESPONSE CHANNEL FILE
 
 result_df = pd.read_json(response_file)
+curve_fitting_df = pd.read_json(curve_fitting_file)
 
 # add new cols
-for curve in curves:
-    cols = ["r_squared", "params", "d_aic"]
-    dtypes = [float, object, float]
-    for dtype, col in zip(dtypes, cols):
-        if f"{curve['name']}_{col}" not in result_df.columns:
-            result_df[f"{curve['name']}_{col}"] = pd.Series(dtype=dtype)
-
 results = {}
 
 
@@ -97,7 +81,6 @@ for patient_id in patients_id:
     intensities = np.array(intensities)
     norm_intensities = intensities / np.max(intensities)
 
-    # results[patient_id] = {}
     stim_channel_names = patient_df["stim_channel_name"].unique()
     for stim_channel_name in stim_channel_names:
         stim_channel_df = patient_df[
@@ -114,10 +97,6 @@ for patient_id in patients_id:
         gs = GridSpec(n_rows, n_cols, figure=fig)
 
         n_r_squared_significant = 0
-
-        params_across = {}
-        for curve in curves:
-            params_across[curve["name"]] = []
 
         connection_df = stim_channel_df[stim_channel_df["is_significant"] == True]
         rows = []
@@ -169,71 +148,70 @@ for patient_id in patients_id:
             aic_main = np.nan
             aic_secondary = np.nan
             curve_fittings = {}
-            for j, curve in enumerate(curves):
-                linestyles = ["solid", "dashed", "dotted"]
-                for k, loss in enumerate(LOSSES):
-                    try:
-                        if curve["name"] == "5P":
-                            main_initial_values = {"shape": 1}
-                            params, nfev = fallback_fit_curve(
-                                main_curve=CURVES["5P"],
-                                fallback_curve=CURVES["4P"],
-                                x=norm_intensities,
-                                y=norm_med_lls,
-                                loss=loss,
-                                max_iterations=MAX_ITERATIONS,
-                                main_initial_values=main_initial_values,
-                            )
-                        else:
-                            params, nfev = fit_curve(
-                                curve_function=curve["function"],
-                                x=norm_intensities,
-                                y=norm_med_lls,
-                                initial_values=curve["initial_values"],
-                                bounds=curve["bounds"],
-                                loss=loss,
-                                full_output=True,
-                                max_iterations=MAX_ITERATIONS,
-                            )
 
-                        x_fit = np.linspace(0, 1, 1000)
-                        y_fit = curve["function"](x_fit, *params)
-                        exi = np.trapezoid(y_fit, x_fit)
-                        y_pred = curve["function"](norm_intensities, *params)
+            linestyles = ["solid", "dashed", "dotted"]
+            for k, loss in enumerate(LOSSES):
+                curve_fitting_row = curve_fitting_df[
+                    (curve_fitting_df["patient_id"] == patient_id)
+                    & (curve_fitting_df["stim_channel_name"] == stim_channel_name)
+                    & (curve_fitting_df["response_channel_name"] == channel_name)
+                ].iloc[0]
+                initial_values_list = [
+                    CURVE["initial_values"],
+                    curve_fitting_row["4P_params"] + [1],
+                ]
+                initial_value_names = ["Ordinary", "4P"]
+                # plot 4P initial fit
+                if loss == LOSSES[0]:
+                    ax.plot(
+                        x_fit,
+                        CURVE["function"](
+                            x_fit, *(curve_fitting_row["4P_params"] + [1])
+                        ),
+                        label=f"4P init",
+                        color="gray",
+                        linestyle="dashdot",
+                    )
+                for j, initial_values in enumerate(initial_values_list):
+                    try:
+                        params, nfev = fit_curve(
+                            curve_function=CURVE["function"],
+                            x=norm_intensities,
+                            y=norm_med_lls,
+                            initial_values=initial_values,
+                            bounds=CURVE["bounds"],
+                            loss=loss,
+                            full_output=True,
+                            max_iterations=MAX_ITERATIONS,
+                        )
+
+                        y_fit = CURVE["function"](x_fit, *params)
+                        y_pred = CURVE["function"](norm_intensities, *params)
 
                         # num params +1 for variance of errors: https://en.wikipedia.org/wiki/Akaike_information_criterion#Counting_parameters
                         performance_dict = calculate_model_performance(
                             y=norm_med_lls,
                             y_pred=y_pred,
-                            num_params=len(curve["initial_values"]) + 1,
+                            num_params=len(CURVE["initial_values"]) + 1,
                         )
 
-                        if curve["name"] == MAIN_CURVE_NAME:
-                            aic_main = performance_dict["dAIC"]
-                            if performance_dict["r_squared"] > R_SQUARED_THRESHOLD:
-                                n_r_squared_significant += 1
-                            else:
-                                ax.set_facecolor("#f8ffc9")
-                        elif curve["name"] == SECONDARY_CURVE_NAME:
-                            aic_secondary = performance_dict["dAIC"]
                         res_row.update(
                             {
-                                f"{curve['name']}_params": params,
-                                f"{curve['name']}_r_squared": performance_dict[
+                                f"{initial_value_names[j]}_init_{loss}_5P_params": params,
+                                f"{initial_value_names[j]}_init_{loss}_5P_r_squared": performance_dict[
                                     "r_squared"
                                 ],
-                                f"{curve['name']}_d_aic": performance_dict["dAIC"],
-                                f"{curve['name']}_d_aicc": performance_dict["dAICc"],
-                                f"{curve['name']}_d_bic": performance_dict["dBIC"],
-                                f"{curve['name']}_nfev": nfev,
-                                f"{curve['name']}_exi": exi,
+                                f"{initial_value_names[j]}_init_{loss}_5P_d_aic": performance_dict[
+                                    "dAIC"
+                                ],
+                                f"{initial_value_names[j]}_init_{loss}_5P_nfev": nfev,
                             }
                         )
 
                         ax.plot(
                             x_fit,
                             y_fit,
-                            label=f"{curve['name']}/{loss}: {performance_dict['r_squared']: .2f}, n_iter={nfev}",
+                            label=f"{initial_value_names[j]}-5P/{loss}:\n{performance_dict['r_squared']: .2f}, n_iter={nfev}",
                             color=colors[j],
                             linestyle=linestyles[k],
                         )
@@ -243,49 +221,36 @@ for patient_id in patients_id:
                         ax.set_xlim(0, 1)
                     except Exception as e:
                         print(
-                            f"{channel_name}/{curve['name']}: Optimization failed.", e
+                            f"{channel_name}/{initial_value_names[j]}_init_{loss}_5P/{loss}: Optimization failed. {e}"
                         )
-                        if curve["name"] == MAIN_CURVE_NAME:
-                            ax.set_facecolor("#f7c1c1")
-
-                            # try:
-                            #     new_init = np.append(res_row["4P_params"], 1)
-                            #     params, nfev = fit_curve(
-                            #         curve_function=curve["function"],
-                            #         x=norm_intensities,
-                            #         y=norm_med_lls,
-                            #         initial_values=new_init,
-                            #         bounds=curve["bounds"],
-                            #         loss=loss,
-                            #         full_output=True,
-                            #         max_iterations=MAX_ITERATIONS + 20000,
-                            #     )
-                            #     print(f"{channel_name} SUCCESS WITH 4P INIT")
-                            # except RuntimeError as e:
-                            #     print(f"{channel_name} FAILED WITH 4P INIT")
-
+                        ax.set_facecolor("#f7c1c1")
+                        res_row.update(
+                            {
+                                f"{initial_value_names[j]}_init_{loss}_5P_nfev": -1,
+                            }
+                        )
             rows.append(res_row)
 
-            ax.legend()
+            ax.legend(fontsize=8)
 
-            ax.set_title(
-                f"{channel_name} ({destrieux_label}):\nSNR {row['snr']:.2f}"  # FIXME dAIC {aic_main-aic_secondary: .2f} ({MAIN_CURVE_NAME}/{SECONDARY_CURVE_NAME})"
-            )
+            ax.set_title(f"{channel_name} ({destrieux_label}):\nSNR {row['snr']:.2f}")
 
         plt.suptitle(
             f"{base_path} - Stimulation response curves for {patient_id} - {stim_channel_name}\nn_replications={n_replications}"
-            + f"\nn_responses={n_response_channels}, n_connections={n_connections}, n_sigmoidal={n_r_squared_significant} ({n_r_squared_significant/n_connections if n_connections else 0:.2%})"
+            + f"\nn_responses={n_response_channels}, n_connections={n_connections}"
         )
         plt.tight_layout(rect=[0, 0, 1, 0.96])
-        plt.savefig(f"{out_path}/curve_fittings_{patient_id}_{stim_channel_name}.png")
+        plt.savefig(
+            f"{out_path}/convergence_analysis_{patient_id}_{stim_channel_name}.png"
+        )
         plt.close()
 
-        curve_fitting_df = pd.DataFrame(rows)
+        convergence_analysis_df = pd.DataFrame(rows)
 
-        lock_path = curve_fitting_file + ".lock"
+        lock_path = convergence_analysis_file + ".lock"
         with FileLock(lock_path):
-            if os.path.exists(curve_fitting_file):
-                df = pd.read_json(curve_fitting_file, orient="records")
+            if os.path.exists(convergence_analysis_file):
+                df = pd.read_json(convergence_analysis_file, orient="records")
                 # Remove old entries
                 mask = (df["patient_id"] == patient_id) & (
                     df["stim_channel_name"] == stim_channel_name
@@ -295,6 +260,10 @@ for patient_id in patients_id:
                 df = df[~mask]
 
                 # Combine
-                curve_fitting_df = pd.concat([df, curve_fitting_df], ignore_index=True)
+                convergence_analysis_df = pd.concat(
+                    [df, convergence_analysis_df], ignore_index=True
+                )
 
-            curve_fitting_df.to_json(curve_fitting_file, orient="records", indent=4)
+            convergence_analysis_df.to_json(
+                convergence_analysis_file, orient="records", indent=4
+            )

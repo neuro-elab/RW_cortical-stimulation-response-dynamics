@@ -18,6 +18,7 @@ from connectivity.load import (
 from connectivity.analyze import (
     bootstrap_curve_fitting,
     evaluate_bootstrap_result,
+    fallback_fit_curve,
     find_max_n_replications,
     filter_logs,
     fit_curve,
@@ -31,23 +32,14 @@ from connectivity.curves import CURVES
 if __name__ == "__main__":
     load_dotenv()
 
-    DATA_PAPER = True
-
-    if DATA_PAPER:
-        BASE_PATH = os.getenv("BASE_PATH_PAPER", "/default/path")
-    else:
-        BASE_PATH = os.getenv("BASE_PATH", "/default/path")
-    # base_path = "D:/data"
+    BASE_PATH = os.getenv("BASE_PATH_PAPER", "/default/path")
     PATIENTS_ID = [arg for arg in sys.argv[1:]]  # ["EL027", "EL019", "EL022", "EL026"]
     print(f"Patients: {PATIENTS_ID}")
 
-    OUT_PATH = (
-        "output/paper/bootstrap_curve_analysis"
-        if DATA_PAPER
-        else "output/bootstrap_curve_analysis"
-    )
+    OUT_PATH = "output/bootstrap_curve_analysis"
 
     CURVE = CURVES["5P"]
+    FALLBACK_CURVE = CURVES["4P"]
     STORE_ALL_DATA = True
 
     N_BOOTSTRAP_GROUND_TRUTH = 500
@@ -55,22 +47,10 @@ if __name__ == "__main__":
     R_SQUARED_THRESHOLD = 0.6
     N_REPLICATIONS_ORIGINAL = 12
     BOOTSTRAP_PERCENTILES = [2.5, 97.5]  #
-    CURVE_FITTING_RESULT_FILE = (
-        f"output/paper/curve_fitting/curve_fitting_lf.json"
-        if DATA_PAPER
-        else f"output/curve_fitting/curve_fitting_lf.json"
-    )
-    SURROGATE_RESULT_FILE = (
-        f"output/paper/significant_responses/response_channels_lf.json"
-        if DATA_PAPER
-        else f"output/significant_responses/response_channels_lf.json"
-    )
+    CURVE_FITTING_RESULT_FILE = f"output/curve_fitting/curve_fitting_lf.json"
+    SURROGATE_RESULT_FILE = f"output/significant_responses/response_channels_lf.json"
     CLEAN_DATA = True
-    CLEAN_DATA_FILE = (
-        ("out/clean_CR_IO/bad_responses_dict.json")
-        if DATA_PAPER
-        else ("out/clean/bad_responses_dict.json")
-    )
+    CLEAN_DATA_FILE = "out/clean_CR_IO/bad_responses_dict.json"
     SLEEP_STAGES = [SleepStage.AWAKE, SleepStage.QWAKE]
     LOSS = "linear"
     MAX_ITERATIONS = 1000
@@ -78,36 +58,49 @@ if __name__ == "__main__":
     USE_CACHE_GT = False
     USE_CACHE_SUBSET = False
     USE_MIN_NORMALIZATION = True
+    BASELINE_CORRECTION = True
+    SUBSET_WITH_REPLACEMENT = False
 
-    BOOT_R_SQUARED_THRESHOLD = 0.6
+    BOOT_R_SQUARED_THRESHOLD = -1
 
     EXCLUDE_INTENSITIES_MATRICES = {
         17: [
+            [],  # all intensities
+            [12],
+            [12, 14],
+            [12, 14, 1],
+            [12, 14, 1, 3],
+            [12, 14, 1, 3, 5],
+            [12, 14, 1, 3, 5, 7],
+            [12, 14, 1, 3, 5, 7, 10],
+            [12, 14, 1, 3, 5, 7, 10, 8],
+            [12, 14, 1, 3, 5, 7, 10, 15],
+            [12, 14, 1, 3, 5, 7, 10, 8, 15],
+        ],
+        18: [
+            [],  # all intensities
+            [2],
+            [2, 13],
+            [2, 13, 15],
+            [2, 13, 15, 1],
+            [2, 13, 15, 1, 4],
+            [2, 13, 15, 1, 4, 6],
+            [2, 13, 15, 1, 4, 6, 8],
+            [2, 13, 15, 1, 4, 6, 8, 11],
+            [2, 13, 15, 1, 4, 6, 8, 11, 9],
+            [2, 13, 15, 1, 4, 6, 8, 11, 16],
+            [2, 13, 15, 1, 4, 6, 8, 11, 9, 16],
+        ],
+        15: [
             [],  # all intensities
             [1],
             [1, 3],
             [1, 3, 5],
             [1, 3, 5, 7],
-            [1, 3, 5, 7, 12],
-            [1, 3, 5, 7, 12, 14],
-            [1, 3, 5, 7, 12, 14, 10],
-            [1, 3, 5, 7, 12, 14, 10, 8],
-            [1, 3, 5, 7, 12, 14, 10, 15],
-            [1, 3, 5, 7, 12, 14, 10, 8, 15],
-        ],
-        18: [
-            [],  # all intensities
-            [2],
-            [2, 1],
-            [2, 1, 4],
-            [2, 1, 4, 6],
-            [2, 1, 4, 6, 8],
-            [2, 1, 4, 6, 8, 13],
-            [2, 1, 4, 6, 8, 13, 15],
-            [2, 1, 4, 6, 8, 13, 15, 11],
-            [2, 1, 4, 6, 8, 13, 15, 11, 9],
-            [2, 1, 4, 6, 8, 13, 15, 11, 16],
-            [2, 1, 4, 6, 8, 13, 15, 11, 9, 16],
+            [1, 3, 5, 7, 10],
+            [1, 3, 5, 7, 10, 8],
+            [1, 3, 5, 7, 10, 13],
+            [1, 3, 5, 7, 10, 8, 13],
         ],
     }
 
@@ -125,6 +118,7 @@ if __name__ == "__main__":
                 "base_path": BASE_PATH,
                 "patients_id": PATIENTS_ID,
                 "curves": CURVE["name"],
+                "fallback_curve": FALLBACK_CURVE["name"],
                 "curve_fitting_result_file": CURVE_FITTING_RESULT_FILE,
                 "bootstrap_percentiles": BOOTSTRAP_PERCENTILES,
                 "clean_data": CLEAN_DATA,
@@ -138,6 +132,8 @@ if __name__ == "__main__":
                 "use_cahe_subset": USE_CACHE_SUBSET,
                 "boot_r_squared_threshold": BOOT_R_SQUARED_THRESHOLD,
                 "use_min_normalization": USE_MIN_NORMALIZATION,
+                "baseline_correction": BASELINE_CORRECTION,
+                "subset_with_replacement": SUBSET_WITH_REPLACEMENT,
             },
             f,
             indent=4,
@@ -161,12 +157,7 @@ if __name__ == "__main__":
 
     for patient_id in PATIENTS_ID:
         print(f"{pd.Timestamp.now()}: Processing patient {patient_id}")
-        names_h5 = get_h5_names_of_patient(
-            BASE_PATH,
-            patient_id,
-            protocol="CR",
-            new_overview_format=True if DATA_PAPER else False,
-        )
+        names_h5 = get_h5_names_of_patient(BASE_PATH, patient_id, protocol="CR")
         results[patient_id] = {}
 
         path_lookup = f"{BASE_PATH}/{patient_id}/Electrodes/Lookup.xlsx"
@@ -264,33 +255,24 @@ if __name__ == "__main__":
                     )[0]
 
                     ll_med_values = parsed_list_to_numpy_array(df_row["med_lls"])
-                    ll_values = parsed_list_to_numpy_array(df_row["ll_values"])
-
+                    ll_values = parsed_list_to_numpy_array(
+                        df_row["ll_values"]
+                    )  # baseline correction already applied
                     normalized_ll_med_values = normalize_ll_values(
-                        ll_values=ll_med_values, axis=0, use_min=USE_MIN_NORMALIZATION
+                        ll_values=ll_med_values,
+                        axis=0,
+                        min=0 if BASELINE_CORRECTION else None,
+                        use_min=USE_MIN_NORMALIZATION,
                     )
                     shared_ll_min = np.nanmin(ll_med_values, axis=0)
                     shared_ll_max = np.nanpercentile(ll_med_values, 95, axis=0)
                     norm_ll_values = normalize_ll_values(
                         ll_values=ll_values,
                         max=shared_ll_max,
-                        min=shared_ll_min,
+                        min=0 if BASELINE_CORRECTION else shared_ll_min,
                         use_min=USE_MIN_NORMALIZATION,
                         axis=0,
                     )
-
-                    # if not np.allclose(ll_med_values, df_row["med_lls"]):
-                    #     print(
-                    #         f"Warning: Median LL values from surrogate file and freshly calculated do not match for {patient_id} - {stim_channel_name} - {response_channel_name}, difference: {np.sum(np.abs(ll_med_values - df_row['med_lls']))}"
-                    #     )
-
-                    # if not np.allclose(
-                    #     normalized_ll_med_values,
-                    #     df_row["norm_med_lls"],
-                    # ):
-                    #     print(
-                    #         f"Normalized median LL values from surrogate file and freshly calculated do not match for {patient_id} - {stim_channel_name} - {response_channel_name}, difference: {np.sum(np.abs(normalized_ll_med_values - df_row['norm_med_lls']))}"
-                    #     )
 
                     x_fit = np.linspace(
                         min(norm_intensities),
@@ -300,13 +282,22 @@ if __name__ == "__main__":
 
                     ### ORIGINAL FIT
                     try:
-                        params_original = fit_curve(
-                            curve_function=CURVE["function"],
+                        main_initial_values = {"shape": 1}
+                        params_original, _ = fallback_fit_curve(
+                            main_curve=CURVE,
+                            fallback_curve=FALLBACK_CURVE,
                             x=norm_intensities,
                             y=normalized_ll_med_values,
-                            initial_values=CURVE["initial_values"],
-                            bounds=CURVE["bounds"],
+                            max_iterations=MAX_ITERATIONS,
+                            main_initial_values=main_initial_values,
                         )
+                        # params_original = fit_curve(
+                        #     curve_function=CURVE["function"],
+                        #     x=norm_intensities,
+                        #     y=normalized_ll_med_values,
+                        #     initial_values=CURVE["initial_values"],
+                        #     bounds=CURVE["bounds"],
+                        # )
                         y_fit_original = CURVE["function"](
                             x_fit, *params_original
                         )  # shape (1000,)
@@ -329,7 +320,7 @@ if __name__ == "__main__":
                         )
                         plt.close("all")
 
-                    except RuntimeError:
+                    except Exception as e:
                         print("Could not fit curve")
                         continue
 
@@ -362,7 +353,7 @@ if __name__ == "__main__":
                             y=norm_ll_values,
                             initial_values=CURVE["initial_values"],
                             bounds=CURVE["bounds"],
-                            max_optimizer_iterations=MAX_ITERATIONS,
+                            max_optimizer_iterations=MAX_ITERATIONS,  # more?
                             loss=LOSS,
                             n_bootstrap=N_BOOTSTRAP_GROUND_TRUTH,
                             parallelize=True,
@@ -557,6 +548,7 @@ if __name__ == "__main__":
                                     n_bootstrap=N_BOOTSTRAP_SUBSETS,
                                     parallelize=True,
                                     normalize=False,
+                                    with_replacement=SUBSET_WITH_REPLACEMENT,
                                 )
                                 subset_params_matrix.append(subset_params_list)
                             else:

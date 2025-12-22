@@ -17,6 +17,7 @@ import scipy.stats
 from connectivity.load import MultipleHDFResponseLoader, get_h5_names_of_patient
 from connectivity.analyze import (
     calculate_continuous_line_length,
+    calculate_ll_baseline,
     calculate_peak_latency,
     calculate_pointwise_line_length_max,
     calculate_upper_bounds_using_surrogates_auc,
@@ -41,39 +42,27 @@ class SignificanceMethod(Enum):
 if __name__ == "__main__":
     load_dotenv()
 
-    DATA_PAPER = True
-
     n_surrogates = 1000
     r_squared_theshold = 0.6
     n_replications = 12
-    if DATA_PAPER:
-        base_path = os.getenv("BASE_PATH_PAPER", "/default/path")
-    else:
-        base_path = os.getenv("BASE_PATH", "/default/path")
-    # base_path = "D:/data"
+
+    base_path = os.getenv("BASE_PATH_PAPER", "/default/path")
+
     patients_id = [arg for arg in sys.argv[1:]]  # ["EL027", "EL019", "EL022", "EL026"]
     print(f"Patients: {patients_id}")
-    out_path = (
-        "output/paper/significant_responses"
-        if DATA_PAPER
-        else "output/significant_responses"
-    )
+    out_path = "output/significant_responses"
+
     sleep_stage = [SleepStage.AWAKE, SleepStage.QWAKE]
 
     curves = [
         CURVES["5P"],
         CURVES["4P"],
     ]
+    PROTOCOL = "CR_IO"  # Ph_IO
+    PROTOCOL_SHORT = "CR"  # Ph
     CLEAN_DATA = True
-    CLEAN_DATA_FILE = (
-        (
-            "out/clean_CR_IO/bad_responses_dict.json"  # "out/clean/bad_responses_dict.json"
-        )
-        if DATA_PAPER
-        else (
-            "out/clean/bad_responses_dict.json"  # "out/clean/bad_responses_dict.json"
-        )
-    )
+    CLEAN_DATA_FILE = f"out/clean_{PROTOCOL}/bad_responses_dict.json"  # "out/clean/bad_responses_dict.json"
+
     CLEANING_SURROGATES = False  # True
     CLEANING_SCALE_FACTOR = -1  # 4
     # SIGNIFICANCE_LEVEL = 0.995
@@ -82,9 +71,14 @@ if __name__ == "__main__":
     SIGNIFICANCE_LEVEL_SPEAR = 0.995
     METHOD = SignificanceMethod.SPEARMAN
 
-    USE_CACHE = False
+    USE_CACHE = True
     DO_NOT_UPDATE_JSON = False  # FIXME
+    if DO_NOT_UPDATE_JSON:
+        print("WARNING: NOT UPDATING JSON FILE WITH RESULTS!")
     USE_MIN_NORMALIZATION = True
+    BASELINE_CORRECTION = True
+    CALCULATE_EXTENDED_MEASURES = True
+    USE_CONDITION_STIMBLOCK_FILTER = False
 
     import multiprocessing as mp
 
@@ -113,6 +107,10 @@ if __name__ == "__main__":
                 "use_cache": USE_CACHE,
                 "do_not_update_json": DO_NOT_UPDATE_JSON,
                 "use_min_normalization": USE_MIN_NORMALIZATION,
+                "baseline_correction": BASELINE_CORRECTION,
+                "protocol": PROTOCOL,
+                "protocol_short": PROTOCOL_SHORT,
+                "calculate_extended_measures": CALCULATE_EXTENDED_MEASURES,
             },
             f,
             indent=4,
@@ -129,10 +127,7 @@ if __name__ == "__main__":
     for patient_id in patients_id:
         print(f"{pd.Timestamp.now()}: Processing patient {patient_id}")
         names_h5 = get_h5_names_of_patient(
-            base_path,
-            patient_id,
-            protocol="CR",
-            new_overview_format=True if DATA_PAPER else False,
+            base_path, patient_id, protocol=PROTOCOL_SHORT
         )
         results[patient_id] = {}
 
@@ -160,7 +155,7 @@ if __name__ == "__main__":
 
         logs = mrl.get_logs()
 
-        io_stim_channels = logs[logs["type"] == "CR_IO"][
+        io_stim_channels = logs[logs["type"] == PROTOCOL][
             ["name_pos", "name_neg"]
         ].drop_duplicates()
         io_stim_channel_names = io_stim_channels.agg("-".join, axis=1).tolist()
@@ -174,9 +169,10 @@ if __name__ == "__main__":
                 complete_logs=logs,
                 selected_stim_channel_name_neg=io_stim_channel["name_neg"],
                 selected_stim_channel_name_pos=io_stim_channel["name_pos"],
-                stim_protocol="CR_IO",
+                stim_protocol=PROTOCOL,
                 sleep_states=sleep_stage,
             )
+            print(max_n_replications)
             if max_n_replications < n_replications:
                 print(f"Not enough replications for {patient_id} - {io_stim_channel}")
                 continue
@@ -205,7 +201,7 @@ if __name__ == "__main__":
             )
 
             io_intensities = (
-                logs[logs["type"] == "CR_IO"]["Int_prob"].drop_duplicates().tolist()
+                logs[logs["type"] == PROTOCOL]["Int_prob"].drop_duplicates().tolist()
             )
             io_intensities.sort()
             io_intensities.insert(0, 0)
@@ -224,8 +220,9 @@ if __name__ == "__main__":
                 significance_level=SIGNIFICANCE_LEVEL_SURR,
                 sleep_score_restriction=sleep_stage,
                 cleaning_factor=CLEANING_SCALE_FACTOR,
-                out_file_name=f"{out_path}/null_distribution_{patient_id}_{io_stim_channel['name_pos']}-{io_stim_channel['name_neg']}.npy",
+                out_file_name=f"{out_path}/null_distribution_{PROTOCOL}_{patient_id}_{io_stim_channel['name_pos']}-{io_stim_channel['name_neg']}.npy",
                 use_cache=USE_CACHE,
+                baseline_correction=BASELINE_CORRECTION,
             )
             upper_bounds = surrogate_result["upper_bounds"]["significance_level"]
             upper_bounds_95 = surrogate_result["upper_bounds"]["upper_bounds_95"]
@@ -239,10 +236,10 @@ if __name__ == "__main__":
 
             plt.tight_layout(rect=[0, 0, 1, 0.96])
             plt.savefig(
-                f"{out_path}/null_distribution_{patient_id}_{io_stim_channel['name_pos']}-{io_stim_channel['name_neg']}.png"
+                f"{out_path}/null_distribution_{PROTOCOL}_{patient_id}_{io_stim_channel['name_pos']}-{io_stim_channel['name_neg']}.png"
             )
             plt.suptitle(
-                f"{base_path} - {io_stim_channel['name_pos']}-{io_stim_channel['name_neg']} - n_replications={n_replications}"
+                f"{base_path} - {PROTOCOL} - {io_stim_channel['name_pos']}-{io_stim_channel['name_neg']} - n_replications={n_replications}"
             )
             plt.close("all")
 
@@ -257,25 +254,71 @@ if __name__ == "__main__":
                 selected_intensities=io_intensities,
                 exclude_responses=CLEAN_DATA,
             )
+            original_ll_values = ll_values.copy()
             # (n_intensities, n_replications, n_response_channel_paths)
+            if BASELINE_CORRECTION:
+                baseline_ll = calculate_ll_baseline(
+                    data=traces, offset_stim_seconds=1, f_sample=mrl.f_sample
+                )  # shape: (n_intensities, n_replications, n_response_channel_paths)
+                ll_values = ll_values - baseline_ll
+                ll_med_values = np.nanmedian(
+                    ll_values, axis=1
+                )  # shape (n_intensities, n_response_channel_paths)
+            else:
+                ll_med_values = np.nanmedian(
+                    ll_values, axis=1
+                )  # shape (n_intensities, n_response_channel_paths)
+
+            if CALCULATE_EXTENDED_MEASURES:
+                # N1, N2 amplitudes
+                n1_window = (round(1 * mrl.f_sample), round(1.05 * mrl.f_sample))
+                n2_window = (round(1.05 * mrl.f_sample), round(1.4 * mrl.f_sample))
+                n1_single_trials = np.nanmax(
+                    np.abs(traces[:, :, :, n1_window[0] : n1_window[1]]), axis=3
+                )
+                n1_med_values = np.nanmedian(n1_single_trials, axis=1)
+                n2_single_trials = np.nanmax(
+                    np.abs(traces[:, :, :, n2_window[0] : n2_window[1]]), axis=3
+                )
+                n2_med_values = np.nanmedian(n2_single_trials, axis=1)
+
+                # Peak to peak amplitudes
+                peak_to_peak_window = (round(1 * mrl.f_sample), round(2 * mrl.f_sample))
+                peak_to_peak_single_trials = np.nanmax(
+                    traces[:, :, :, peak_to_peak_window[0] : peak_to_peak_window[1]],
+                    axis=3,
+                ) - np.nanmin(
+                    traces[:, :, :, peak_to_peak_window[0] : peak_to_peak_window[1]],
+                    axis=3,
+                )
+                peak_to_peak_med_values = np.nanmedian(
+                    peak_to_peak_single_trials, axis=1
+                )
+                # RMS
+                root_mean_square_window = (
+                    round(1 * mrl.f_sample),
+                    round(1.4 * mrl.f_sample),
+                )
+                root_mean_square_single_trials = np.sqrt(
+                    np.nanmean(
+                        traces[
+                            :,
+                            :,
+                            :,
+                            root_mean_square_window[0] : root_mean_square_window[1],
+                        ]
+                        ** 2,
+                        axis=3,
+                    )
+                )
+                root_mean_square_med_values = np.nanmedian(
+                    root_mean_square_single_trials, axis=1
+                )
 
             # calculate peak latency and CCEP onset
-            peak_latencies, peak_lat_traces = calculate_peak_latency(
-                traces=traces, offset_stim_seconds=1, f_sample=mrl.f_sample
-            )  # (n_intensities, n_response_channel_paths)
-
-            # calculate baseline LL
-            baseline_end_index = round(1 * mrl.f_sample)
-            baseline_traces = traces[:, :, :, :baseline_end_index]
-            ll_baseline = calculate_pointwise_line_length_max(
-                data=baseline_traces, offset_stim_seconds=0.4, f_sample=mrl.f_sample
-            )
-            ll_med_values = np.nanmedian(
-                ll_values, axis=1
-            )  # shape (n_intensities, n_response_channel_paths)
-            ll_baseline_med_values = np.nanmedian(
-                ll_baseline, axis=1
-            )  # shape (n_intensities, n_response_channel_paths)
+            # peak_latencies, peak_lat_traces = calculate_peak_latency(
+            #    traces=traces, offset_stim_seconds=1, f_sample=mrl.f_sample
+            # )  # (n_intensities, n_response_channel_paths)
 
             intensities_reshaped = np.array(io_intensities)[
                 :, None
@@ -287,28 +330,39 @@ if __name__ == "__main__":
 
             ## NORMALIZATION OF LL VALUES
             result_response_channels = []
+            if BASELINE_CORRECTION:
+                normalized_ll_med_values = normalize_ll_values(
+                    ll_values=ll_med_values, min=0, axis=0  # no min normalization
+                )
 
-            normalized_ll_med_values = normalize_ll_values(
-                ll_values=ll_med_values,
-                # surrogate_ll_percentile_5=surrogates_percentiles_med["5"],
-                axis=0,
-                use_min=USE_MIN_NORMALIZATION,
-            )
+            else:
+                normalized_ll_med_values = normalize_ll_values(
+                    ll_values=ll_med_values,
+                    axis=0,
+                    use_min=USE_MIN_NORMALIZATION,
+                )
 
             norm_io_intensities = io_intensities / np.max(io_intensities)
 
-            # SIGNAL-TO-NOISE RATIO based on datapoints
+            # SIGNAL-TO-NOISE RATIO based on surrogates
+            # snr = (
+            #     np.nanpercentile(ll_med_values, q=95, axis=(0))
+            #     / surrogates_percentiles_med["95"]
+            # )
+            # SNR based on baseline
+            baseline_95_percentiles = np.nanpercentile(
+                np.nanmedian(baseline_ll, axis=1), q=95, axis=(0)
+            )
             snr = (
-                np.nanpercentile(ll_med_values, q=95, axis=(0))
-                / surrogates_percentiles_med["95"]
+                np.nanpercentile(np.nanmedian(original_ll_values, axis=1), q=95, axis=0)
+                / baseline_95_percentiles
             )
 
             # RANKS
-            ideal_ranks = np.arange(len(io_intensities)) + 1
+            ideal_ranks = np.arange(len(io_intensities) - 1) + 1
 
             spearman_p_values = []
             spearman_rhos = []
-            wilcoxon_p_values = []
             surrogate_p_values = []
 
             for i, response_channel_path in enumerate(channel_paths):
@@ -321,17 +375,12 @@ if __name__ == "__main__":
                 surrogate_p_values.append(surrogate_p_value)
 
                 spearman_rho, spearman_p_value = scipy.stats.spearmanr(
-                    ll_med_values[:, i], ideal_ranks
+                    # ignore at 0mA
+                    ll_med_values[1:, i],
+                    ideal_ranks,
                 )
                 spearman_p_values.append(float(spearman_p_value))
                 spearman_rhos.append(float(spearman_rho))
-
-                signs = np.sign(
-                    ll_med_values[1:, i] - ll_baseline_med_values[1:, i]
-                )  # ignore 0mA component
-                # One-sided binomial test?
-                statistic, wilcoxon_p_value = scipy.stats.wilcoxon(signs)
-                wilcoxon_p_values.append(wilcoxon_p_value)
 
             # FDR CORRECTION
             spearman_p_values_fdr_corrected = scipy.stats.false_discovery_control(
@@ -339,9 +388,6 @@ if __name__ == "__main__":
             )
             surrogate_p_values_fdr_corrected = scipy.stats.false_discovery_control(
                 surrogate_p_values, method="bh"
-            )
-            wilcoxon_p_values_fdr_corrected = scipy.stats.false_discovery_control(
-                wilcoxon_p_values, method="bh"
             )
 
             if METHOD == SignificanceMethod.SURROGATES:
@@ -351,11 +397,6 @@ if __name__ == "__main__":
             elif METHOD == SignificanceMethod.SPEARMAN:
                 significance = (
                     spearman_p_values_fdr_corrected < 1 - SIGNIFICANCE_LEVEL_SPEAR
-                )
-            else:
-                assert METHOD == SignificanceMethod.WILCOXON
-                significance = (
-                    wilcoxon_p_values_fdr_corrected < 1 - SIGNIFICANCE_LEVEL_WILX
                 )
 
             cont_ll = calculate_continuous_line_length(
@@ -416,9 +457,9 @@ if __name__ == "__main__":
                 trace_mean = np.nanmean(
                     traces[:, :, i, ll_window_start:ll_window_end], axis=1
                 )  # shape: (chunks, chunk_len)
-                trace_peak_lat = peak_lat_traces[
-                    :, i, ll_window_start:ll_window_end
-                ]  # shape: (chunks, chunk_len)
+                # trace_peak_lat = peak_lat_traces[
+                #    :, i, ll_window_start:ll_window_end
+                # ]  # shape: (chunks, chunk_len)
 
                 # Plot each chunk with color-coded significance
                 for j in range(total_chunks):
@@ -494,18 +535,6 @@ if __name__ == "__main__":
                     and manual_label == 2
                 ):
                     perf_title += "⚠️"
-                # WILX
-                perf_title += f", Wilx {wilcoxon_p_values[i]:.2f}/{wilcoxon_p_values_fdr_corrected[i]:.2f}"
-                if wilcoxon_p_values_fdr_corrected[i] < 1 - SIGNIFICANCE_LEVEL_WILX:
-                    perf_title += "✓"
-                if (
-                    wilcoxon_p_values_fdr_corrected[i] < 1 - SIGNIFICANCE_LEVEL_WILX
-                    and manual_label == -1
-                ) or (
-                    wilcoxon_p_values_fdr_corrected[i] >= 1 - SIGNIFICANCE_LEVEL_WILX
-                    and manual_label == 2
-                ):
-                    perf_title += "⚠️"
 
                 ax_upper.margins(x=0, y=0)
                 ax_upper.set_title(
@@ -567,7 +596,7 @@ if __name__ == "__main__":
                                 color=colors[j],
                             )
 
-                        except RuntimeError as e:
+                        except Exception as e:
                             print(f"{response_channel_name}: Optimization failed.")
                     # ax_lower.set_facecolor("#b6fc9d")
                     ax_lower.legend()
@@ -578,20 +607,25 @@ if __name__ == "__main__":
                 # ax_lower.set_facecolor("#f2c2c2")
 
                 label_color_mapping = {
+                    -2: "#fcbaba",  # no response, drift
                     -1: "#fcbaba",  # no response
                     0: "#ffffff",  # no label
                     1: "#fff7aa",  # unsure
                     2: "#c0ffa2",  # response
+                    3: "#c0ffa2",  # response with decrease
                 }
                 label_desc_mapping = {
+                    -2: "No response/drift",  # no response, drift
                     -1: "No response",  # no response
                     0: "No label",  # no label
                     1: "Unsure",  # unsure
                     2: "Response",  # response
+                    3: "Response/decrease",  # response with decrease
                 }
-                ax_lower.set_facecolor(label_color_mapping[manual_label])
+                ax_lower.set_facecolor(label_color_mapping[int(manual_label)])
 
                 channel_dict = {
+                    "protocol": PROTOCOL,
                     "patient_id": patient_id,
                     "stim_channel_name": stim_channel_name,
                     "response_channel_name": response_channel_name,
@@ -611,10 +645,6 @@ if __name__ == "__main__":
                         i
                     ],
                     "spearman_rho": spearman_rhos[i],
-                    "wilcoxon_p_value": wilcoxon_p_values[i],
-                    "wilcoxon_p_value_fdr_corrected": wilcoxon_p_values_fdr_corrected[
-                        i
-                    ],
                     "surrogate_p_value": surrogate_p_values[i],
                     "surrogate_p_value_fdr_corrected": surrogate_p_values_fdr_corrected[
                         i
@@ -631,6 +661,9 @@ if __name__ == "__main__":
                         "med": float(surrogates_percentiles_med["med"][i]),
                         "95": float(surrogates_percentiles_med["95"][i]),
                     },
+                    "baseline_percentiles_med": {
+                        "95": float(baseline_95_percentiles[i]),
+                    },
                     "id_matrix": id_matrix[:, :, i].tolist(),
                     # "curve_fittings": {},
                 }
@@ -639,10 +672,12 @@ if __name__ == "__main__":
 
             # plt.tight_layout(rect=[0, 0, 1, 0.96])
             plt.suptitle(
-                f"{base_path} - {stim_channel_name} - n_replications={n_replications} \n"
+                f"{base_path} - {PROTOCOL} - {stim_channel_name} - n_replications={n_replications} \n"
                 + f"n_responses={len(channel_paths)}, n_significant={np.sum(significance)}, method={METHOD.name}"
             )
-            plt.savefig(f"{out_path}/responses_{patient_id}_{stim_channel_name}.png")
+            plt.savefig(
+                f"{out_path}/responses_{PROTOCOL}_{patient_id}_{stim_channel_name}.png"
+            )
             plt.close()
 
             json_path = f"{out_path}/response_channels_lf.json"
@@ -652,13 +687,16 @@ if __name__ == "__main__":
                 if os.path.exists(json_path):
                     df = pd.read_json(json_path, orient="records")
                     # Remove old entries
-                    mask = (df["patient_id"] == patient_id) & (
-                        df["stim_channel_name"] == stim_channel_name
+                    mask = (
+                        (df["protocol"] == PROTOCOL)
+                        & (df["patient_id"] == patient_id)
+                        & (df["stim_channel_name"] == stim_channel_name)
                     )
 
                     # Backup existing labels if they exist
                     if "label" in df.columns:
                         key_cols = [
+                            "protocol",
                             "patient_id",
                             "stim_channel_name",
                             "response_channel_name",
@@ -685,3 +723,380 @@ if __name__ == "__main__":
                 # Write back if allowed
                 if not DO_NOT_UPDATE_JSON:
                     df.to_json(json_path, orient="records", indent=4)
+
+            # EXTENDED MEASURES
+            extended_measures_result = []
+            if CALCULATE_EXTENDED_MEASURES:
+                norm_n1_med_values = normalize_ll_values(
+                    ll_values=n1_med_values,
+                    axis=0,
+                    use_min=USE_MIN_NORMALIZATION,
+                )
+                norm_n2_med_values = normalize_ll_values(
+                    ll_values=n2_med_values,
+                    axis=0,
+                    use_min=USE_MIN_NORMALIZATION,
+                )
+                norm_peak_to_peak_med_values = normalize_ll_values(
+                    ll_values=peak_to_peak_med_values,
+                    axis=0,
+                    use_min=USE_MIN_NORMALIZATION,
+                )
+                norm_root_mean_square_med_values = normalize_ll_values(
+                    ll_values=root_mean_square_med_values,
+                    axis=0,
+                    use_min=USE_MIN_NORMALIZATION,
+                )
+
+                n1_spearman_p_values = []
+                n2_spearman_p_values = []
+                peak_to_peak_spearman_p_values = []
+                root_mean_square_spearman_p_values = []
+
+                for i, response_channel_path in enumerate(channel_paths):
+                    response_channel_name = response_channel_path.split("/")[-1]
+
+                    _, n1_spearman_p_value = scipy.stats.spearmanr(
+                        n1_med_values[1:, i], ideal_ranks
+                    )
+                    n1_spearman_p_values.append(float(n1_spearman_p_value))
+                    _, n2_spearman_p_value = scipy.stats.spearmanr(
+                        n2_med_values[1:, i], ideal_ranks
+                    )
+                    n2_spearman_p_values.append(float(n2_spearman_p_value))
+                    _, peak_to_peak_spearman_p_value = scipy.stats.spearmanr(
+                        peak_to_peak_med_values[1:, i], ideal_ranks
+                    )
+                    peak_to_peak_spearman_p_values.append(
+                        float(peak_to_peak_spearman_p_value)
+                    )
+                    _, root_mean_square_spearman_p_value = scipy.stats.spearmanr(
+                        root_mean_square_med_values[1:, i], ideal_ranks
+                    )
+                    root_mean_square_spearman_p_values.append(
+                        float(root_mean_square_spearman_p_value)
+                    )
+
+                # FDR CORRECTION
+                n1_spearman_p_values_fdr_corrected = (
+                    scipy.stats.false_discovery_control(
+                        n1_spearman_p_values, method="bh"
+                    )
+                )
+                n2_spearman_p_values_fdr_corrected = (
+                    scipy.stats.false_discovery_control(
+                        n2_spearman_p_values, method="bh"
+                    )
+                )
+                peak_to_peak_spearman_p_values_fdr_corrected = (
+                    scipy.stats.false_discovery_control(
+                        peak_to_peak_spearman_p_values, method="bh"
+                    )
+                )
+                root_mean_square_spearman_p_values_fdr_corrected = (
+                    scipy.stats.false_discovery_control(
+                        root_mean_square_spearman_p_values, method="bh"
+                    )
+                )
+
+                n_cols = 6
+                n_plots = ll_med_values.shape[1]
+                n_rows = math.ceil(n_plots / n_cols)
+                fig = plt.figure(
+                    figsize=(35, 4.5 * 2 * n_rows), constrained_layout=True
+                )
+                gs = GridSpec(
+                    3 * n_rows,
+                    n_cols,
+                    figure=fig,
+                    height_ratios=[1, 1, 3] * n_rows,
+                )
+                for i, response_channel_path in enumerate(channel_paths):
+                    response_channel_name = response_channel_path.split("/")[-1]
+                    destrieux_label = mrl.get_destrieux_labels_from_names(
+                        channel_names=[response_channel_name], short_form=True
+                    )[0]
+                    extended_measures_dict = {
+                        "protocol": PROTOCOL,
+                        "patient_id": patient_id,
+                        "stim_channel_name": stim_channel_name,
+                        "response_channel_name": response_channel_name,
+                        "n1_med_values": n1_med_values[:, i].tolist(),
+                        "n1_spearman_p_value": float(n1_spearman_p_values[i]),
+                        "n1_spearman_p_value_fdr_corrected": float(
+                            n1_spearman_p_values_fdr_corrected[i]
+                        ),
+                        "n2_med_values": n2_med_values[:, i].tolist(),
+                        "n2_spearman_p_value": float(n2_spearman_p_values[i]),
+                        "n2_spearman_p_value_fdr_corrected": float(
+                            n2_spearman_p_values_fdr_corrected[i]
+                        ),
+                        "peak_to_peak_med_values": peak_to_peak_med_values[
+                            :, i
+                        ].tolist(),
+                        "peak_to_peak_spearman_p_value": float(
+                            peak_to_peak_spearman_p_values[i]
+                        ),
+                        "peak_to_peak_spearman_p_value_fdr_corrected": float(
+                            peak_to_peak_spearman_p_values_fdr_corrected[i]
+                        ),
+                        "root_mean_square_med_values": root_mean_square_med_values[
+                            :, i
+                        ].tolist(),
+                        "root_mean_square_spearman_p_value": float(
+                            root_mean_square_spearman_p_values[i]
+                        ),
+                        "root_mean_square_spearman_p_value_fdr_corrected": float(
+                            root_mean_square_spearman_p_values_fdr_corrected[i]
+                        ),
+                    }
+                    extended_measures_result.append(extended_measures_dict)
+
+                    row, col = divmod(i, n_cols)
+                    ax_upper = fig.add_subplot(gs[3 * row, col])
+                    ax_middle = fig.add_subplot(gs[3 * row + 1, col])
+                    ax_lower = fig.add_subplot(gs[3 * row + 2, col])
+
+                    manual_label = 0
+                    if labels_available:
+                        mask = (
+                            (old_df["patient_id"] == patient_id)
+                            & (old_df["stim_channel_name"] == stim_channel_name)
+                            & (old_df["response_channel_name"] == response_channel_name)
+                        )
+
+                        if "label" in old_df.columns:
+                            s = old_df.loc[mask, "label"].dropna()
+                            manual_label = s.iloc[0] if not s.empty else 0
+                        else:
+                            manual_label = 0
+
+                    ll_window_start = round(
+                        1 * mrl.f_sample
+                    )  # we only want to have the [0, 0.5s] window to display, as it is used for LL calculation
+                    ll_max_window_offset = round(
+                        0.25 * mrl.f_sample
+                    )  # max in [0.25, 0.5s]
+                    ll_window_end = round(1.5 * mrl.f_sample)
+                    chunk_len = ll_window_end - ll_window_start  # traces.shape[3]
+                    total_chunks = ll_med_values.shape[0]
+                    time = np.arange(chunk_len * total_chunks) / mrl.f_sample
+                    trace_mean = np.nanmean(
+                        traces[:, :, i, ll_window_start:ll_window_end], axis=1
+                    )  # shape: (chunks, chunk_len)
+
+                    # Plot each chunk with color-coded significance
+                    for j in range(total_chunks):
+                        # traces
+                        start_idx = j * chunk_len
+                        end_idx = (j + 1) * chunk_len
+                        time_chunk = time[start_idx:end_idx]
+                        trace_chunk = trace_mean[j]
+
+                        for trace in traces[j, :, i, ll_window_start:ll_window_end]:
+                            ax_upper.plot(
+                                time_chunk,
+                                trace,
+                                color="black",
+                                alpha=0.1,
+                                linewidth=0.5,
+                            )
+                        ax_upper.plot(
+                            time_chunk,
+                            trace_chunk,
+                            color=("green" if significance[i] else "red"),
+                            linewidth=0.75,
+                        )
+
+                        start = start_idx / mrl.f_sample
+                        end = end_idx / mrl.f_sample
+                        ax_upper.axvspan(
+                            start,
+                            end,
+                            facecolor=("lightgray" if j % 2 else "white"),
+                            alpha=0.3,
+                            zorder=0,
+                        )
+
+                        # continous line-length
+                        for c_ll in cont_ll[j, :, i, ll_window_start:ll_window_end]:
+                            ax_middle.plot(
+                                time_chunk,
+                                c_ll,
+                                color="black",
+                                alpha=0.5,
+                                linewidth=0.5,
+                            )
+                            max_idx = (
+                                c_ll[ll_max_window_offset:].argmax()
+                                + ll_max_window_offset
+                            )
+                            ax_middle.scatter(
+                                time_chunk[max_idx], c_ll[max_idx], color="purple", s=10
+                            )
+                        ax_middle.axvspan(
+                            start,
+                            end,
+                            facecolor=("lightgray" if j % 2 else "white"),
+                            alpha=0.3,
+                            zorder=0,
+                        )
+
+                    filtered_ll_values = ll_med_values[:, i]
+
+                    ax_upper.margins(x=0, y=0)
+                    ax_upper.set_title(
+                        f"{response_channel_name} ({destrieux_label})"
+                        + ", "
+                        + perf_title,
+                        color="green" if significance[i] else "red",
+                    )
+                    ax_upper.set_ylabel("EEG [uV]")
+                    ax_upper.set_xlabel("Time [s]")
+                    ax_upper.set_xticks([])
+
+                    ax_middle.margins(x=0, y=0)
+                    ax_middle.set_ylabel("LL [uV/ms]")
+                    ax_middle.set_xlabel("Time [s]")
+                    ax_middle.set_xticks([])
+
+                    ax_lower.set_title(f"SNR: {snr[i]:.2f}")
+
+                    ax_lower.plot(
+                        norm_io_intensities[1:],
+                        norm_n1_med_values[1:, i],
+                        c="blue",
+                        label="N1",
+                        linestyle=(
+                            "solid"
+                            if (
+                                n1_spearman_p_values_fdr_corrected[i]
+                                < (1 - SIGNIFICANCE_LEVEL_SPEAR)
+                            )
+                            else "dotted"
+                        ),
+                    )
+                    ax_lower.plot(
+                        norm_io_intensities[1:],
+                        norm_n2_med_values[1:, i],
+                        c="orange",
+                        label="N2",
+                        linestyle=(
+                            "solid"
+                            if (
+                                n2_spearman_p_values_fdr_corrected[i]
+                                < (1 - SIGNIFICANCE_LEVEL_SPEAR)
+                            )
+                            else "dotted"
+                        ),
+                    )
+                    ax_lower.plot(
+                        norm_io_intensities[1:],
+                        norm_peak_to_peak_med_values[1:, i],
+                        c="green",
+                        label="PP",
+                        linestyle=(
+                            "solid"
+                            if (
+                                peak_to_peak_spearman_p_values_fdr_corrected[i]
+                                < (1 - SIGNIFICANCE_LEVEL_SPEAR)
+                            )
+                            else "dotted"
+                        ),
+                    )
+                    ax_lower.plot(
+                        norm_io_intensities[1:],
+                        norm_root_mean_square_med_values[1:, i],
+                        c="red",
+                        label="RMS",
+                        linestyle=(
+                            "solid"
+                            if (
+                                root_mean_square_spearman_p_values_fdr_corrected[i]
+                                < (1 - SIGNIFICANCE_LEVEL_SPEAR)
+                            )
+                            else "dotted"
+                        ),
+                    )
+                    ax_lower.plot(
+                        norm_io_intensities[1:],
+                        normalized_ll_med_values[1:, i],
+                        c="black",
+                        label="LL",
+                        linestyle=("solid" if significance[i] else "dotted"),
+                    )
+
+                    ax_lower.legend()
+                    ax_lower.set_xlabel("Normalized Intensity")
+                    ax_lower.set_ylabel("Normalized LL")
+                    ax_lower.set_ylim(-0.1, 1.2)
+
+                    label_color_mapping = {
+                        -2: "#fcbaba",  # no response, drift
+                        -1: "#fcbaba",  # no response
+                        0: "#ffffff",  # no label
+                        1: "#fff7aa",  # unsure
+                        2: "#c0ffa2",  # response
+                        3: "#c0ffa2",  # response with decrease
+                    }
+                    label_desc_mapping = {
+                        -2: "No response/drift",  # no response, drift
+                        -1: "No response",  # no response
+                        0: "No label",  # no label
+                        1: "Unsure",  # unsure
+                        2: "Response",  # response
+                        3: "Response/decrease",  # response with decrease
+                    }
+                    ax_lower.set_facecolor(label_color_mapping[int(manual_label)])
+                plt.suptitle(
+                    f"{base_path} - {PROTOCOL} - {stim_channel_name} - n_replicates={n_replications}"
+                )
+                plt.savefig(
+                    f"{out_path}/extended_measures_{PROTOCOL}_{patient_id}_{stim_channel_name}.png"
+                )
+                plt.close()
+
+                extended_measures_result = pd.DataFrame(extended_measures_result)
+
+                extended_json_path = f"{out_path}/extended_measures_lf.json"
+                lock_path = extended_json_path + ".lock"
+
+                with FileLock(lock_path):
+                    if os.path.exists(extended_json_path):
+                        df = pd.read_json(extended_json_path, orient="records")
+                        # Remove old entries
+                        mask = (
+                            (df["protocol"] == PROTOCOL)
+                            & (df["patient_id"] == patient_id)
+                            & (df["stim_channel_name"] == stim_channel_name)
+                        )
+                        # Backup existing labels if they exist
+                        if "label" in df.columns:
+                            key_cols = [
+                                "protocol",
+                                "patient_id",
+                                "stim_channel_name",
+                                "response_channel_name",
+                            ]
+                            labels = df.loc[mask, key_cols + ["label"]]
+                        else:
+                            labels = None
+
+                        # Drop old entries
+                        df = df[~mask]
+
+                        # Create new DataFrame
+                        new_df = pd.DataFrame(extended_measures_result)
+
+                        # Restore labels
+                        if labels is not None:
+                            new_df = new_df.merge(labels, on=key_cols, how="left")
+
+                        # Combine
+                        df = pd.concat([df, new_df], ignore_index=True)
+                    else:
+                        df = pd.DataFrame(extended_measures_result)
+
+                    # Write back if allowed
+                    if not DO_NOT_UPDATE_JSON:
+                        df.to_json(extended_json_path, orient="records", indent=4)

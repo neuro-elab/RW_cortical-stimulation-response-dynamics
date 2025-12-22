@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import scipy
 import multiprocessing as mp
+from joblib import Parallel, delayed
 
 
 from connectivity.curves import Curve
@@ -1924,6 +1925,7 @@ def significant_exi_difference_testing(
     ax: plt.Axes = None,
     parallelize=False,
     max_iterations=1000,
+    return_null_distributions=False,
 ):
     assert norm_ll_values_1.shape == norm_ll_values_2.shape
     n_replications = norm_ll_values_1.shape[1]
@@ -2061,14 +2063,17 @@ def significant_exi_difference_testing(
                 alpha=0.4,
                 edgecolor="#088F8F",
                 bins=bins,
-                label="$\\Delta$ExI null distr.",
+                label="$\\Delta$ExI null",
             )
             ax.axvline(actual_delta_exi, color="black", label="$\\Delta$ExI")
 
     except Exception as e:
         surrogate_p_value = np.nan
 
-    return surrogate_p_value_empirical, surrogate_p_value
+    if return_null_distributions:
+        return delta_empirical_exis_null, delta_exis_null
+    else:
+        return surrogate_p_value_empirical, surrogate_p_value
 
 
 def _significant_exi_difference_testing(args):
