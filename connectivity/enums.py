@@ -39,3 +39,12 @@ class TraceGrade(Enum):
     ICTAL = 3
     PREVIEW = 4
     NORMAL = 5
+
+
+class ResponseLabel(Enum):
+    DRIFT = -2
+    NO = -1
+    NO_LABEL = 0
+    UNSURE = 1
+    RESPONSE = 2
+    RESPONSE_DECREASING = 3

@@ -33,13 +33,22 @@ ll_max = calculate_pointwise_line_length_max(
 )
 ```
 
+For longitudinal studies comparing excitability across different brain states, a baseline correction can be applied: the mean line-length value in a pre-stimulation window is subtracted from all line-length values. This ensures that stimulation-response curves start at a comparable low level across brain states without requiring normalization.
+
+```
+ll_baseline = calculate_ll_baseline(data=epochs, offset_stim_seconds=1, f_sample=f_sample)
+
+ll_max = ll_max - ll_baseline
+
+```
+
 To get a single value per intensity, we used the median to be more robust against outliers:
 
 ```
 ll_med = np.nanmedian(ll_max, axis=1)
 ```
 
-To normalize the SRCs, we normalized the intensities using `intensities/np.max(intensities)` and the line-length values using `normalize_ll_values(..., use_min=True)` method provided in `analyze.py`.
+To normalize the SRCs, we normalized the intensities using `intensities/np.max(intensities)` and the line-length values using `normalize_ll_values(..., min=0)` (or `normalize_ll_values(..., use_min=True)` without baseline correction) method provided in `analyze.py`.
 
 #### 2. Connection significance
 
@@ -90,7 +99,19 @@ params = fit_curve(
 
 `params` contains the fitted parameters. Since it is not guaranteed to get convergence, we suggest to wrap it in a `try ... except`.
 
-**Troubleshooting non-convergence**: Increase `max_iterations`, choose suitable initial values, and/or address potential outliers.
+**Troubleshooting non-convergence**: Increase `max_iterations`, choose suitable initial values, and/or address potential outliers. Using fitted parameters 4P as initial values for the 5P helped to increase convergence. A method is provided in `analyze.py` to implement this fallback fitting:
+
+```
+main_initial_values = {"shape": 1}
+params, nfev = fallback_fit_curve(
+    main_curve=CURVES["5P"],
+    fallback_curve=CURVES["4P"],
+    x=norm_intensities,
+    y=norm_med_ll,
+    max_iterations=1000,
+    main_initial_values=main_initial_values,
+)
+```
 
 To calculate the area under the curve, one can use numpy's `trapezoid` method:
 

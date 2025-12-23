@@ -298,14 +298,16 @@ class HDFResponseLoader(HDFDataLoader):
         self,
         times_sec: list[float],
         response_channel_paths: list[str],
-        t_start: int = -4,
-        t_stop: int = 2,
+        t_start: float = -4,
+        t_stop: float = 2,
+        f_sample: int = None,
     ):
         res = []
-        for time in times_sec:
-            start_index = round((time + t_start) * self.f_sample)
-            stop_index = round((time + t_stop) * self.f_sample)
+        f_sample = f_sample if f_sample is not None else self.f_sample
 
+        for time in times_sec:
+            start_index = round((time + t_start) * f_sample)
+            stop_index = round((time + t_stop) * f_sample)
             channels = super().get_data(
                 dataset_paths=response_channel_paths,
                 start_row_index=start_index,
@@ -357,7 +359,7 @@ class HDFResponseLoader(HDFDataLoader):
                 ].values
                 assert len(candidates_pos) == 1
                 label = candidates_pos[0]
-                if label == "WM":
+                if label == "WM" or label == "Cerebral-White-Matter":
                     # if positive in WM, take negative
                     candidates_neg = self.lookup_channels.loc[
                         self.lookup_channels["name"] == name_neg, "destrieux_corrected"
@@ -831,6 +833,10 @@ class MultipleHDFResponseLoader:
 
         return sorted(filtered_channel_paths)
 
+    def get_bipole_mapping(self):
+
+        return self._response_loaders[0].get_bipole_mapping()
+
     def is_stimulating_channel_path(self, channel_path: str, protocol: str = None):
         return self._response_loaders[0].is_stimulating_channel_path(
             channel_path, protocol=protocol
@@ -952,9 +958,10 @@ class MultipleHDFResponseLoader:
         self,
         recording_indices: list[int],
         times_sec: list[float],
-        response_channel_paths: list[str],
-        t_start: int = -4,
-        t_stop: int = 2,
+        response_channel_paths: list[str],  # also monopolar possible
+        t_start: float = -4,
+        t_stop: float = 2,
+        f_sample: int = None,
     ):
         assert len(recording_indices) == len(times_sec)
         index_groups = {}
@@ -972,6 +979,7 @@ class MultipleHDFResponseLoader:
                 response_channel_paths=response_channel_paths,
                 t_start=t_start,
                 t_stop=t_stop,
+                f_sample=f_sample,
             )
             res_list.append(res)
 
@@ -1047,6 +1055,10 @@ class MultipleHDFResponseLoader:
         for rl in self._response_loaders:
             rl.close()
 
+    def get_lookup_channels(self):
+        lookup_channels = self._response_loaders[0].get_lookup_channels()
+        return lookup_channels
+
 
 class Atlas:
     def __init__(
@@ -1084,29 +1096,33 @@ def get_h5_names_of_patient(
     base_path: str,
     patient_id: str,
     protocol: str = None,
-    new_overview_format: bool = False,  # deprecated
     only_sleep_graded_and_ok: bool = True,  # only for new format
 ):
     with open(f"{base_path}/overview.json", "r") as json_file:
         overview = json.load(json_file)
 
-    if protocol is not None:
+    if protocol == "CR":
         names_h5 = [
             recording["file"]
             for recording in sorted(
                 [
                     r
-                    for r in (
-                        overview[patient_id]["electrophy"]
-                        if new_overview_format
-                        else overview[patient_id]
-                    )
+                    for r in (overview[patient_id]["electrophy"])
                     if r["protocol"] == protocol
-                    and (
-                        not new_overview_format
-                        or not only_sleep_graded_and_ok
-                        or (r["sleep"] and r["isOk"])
-                    )
+                    and (not only_sleep_graded_and_ok or (r["sleep"] and r["isOk"]))
+                ],
+                key=lambda r: r["block"],
+            )
+        ]
+    elif protocol == "Ph":
+        names_h5 = [
+            recording["file"]
+            for recording in sorted(
+                [
+                    r
+                    for r in (overview[patient_id]["electrophy"])
+                    if r["protocol"] == protocol
+                    and (not only_sleep_graded_and_ok or r["isOk"])
                 ],
                 key=lambda r: r["block"],
             )

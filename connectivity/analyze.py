@@ -9,8 +9,10 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import scipy
 import multiprocessing as mp
+from joblib import Parallel, delayed
 
 
+from connectivity.curves import Curve
 from connectivity.load import (
     MultipleHDFResponseLoader,
 )
@@ -103,7 +105,10 @@ def calculate_line_length(continuous_ll: np.ndarray, start_index: int, end_index
 
 
 def calculate_pointwise_line_length_max(
-    data: np.ndarray, offset_stim_seconds: float, f_sample: int
+    data: np.ndarray,
+    offset_stim_seconds: float,
+    f_sample: int,
+    window_width_seconds: float = 0.25,
 ):
     """
     Calculate the line-length measure for multidimensional data using the max + continuous method.
@@ -126,14 +131,14 @@ def calculate_pointwise_line_length_max(
     """
     start_index_cll = round(offset_stim_seconds * f_sample)
     end_index_cll = round((offset_stim_seconds + 2) * f_sample)
-    start_index_ll = round(0.25 * f_sample)
+    start_index_ll = round(window_width_seconds * f_sample)
     end_index_ll = round(0.5 * f_sample)
 
     cont_ll = calculate_continuous_line_length(
         data=data,
         start_index=start_index_cll,
         end_index=end_index_cll,
-        window_width_indices=round(0.25 * f_sample),
+        window_width_indices=round(window_width_seconds * f_sample),
         f_sample=f_sample,
     )
     single_ll = calculate_line_length(
@@ -187,6 +192,32 @@ def calculate_pointwise_line_length(
     return ll
 
 
+def calculate_ll_baseline(
+    data, offset_stim_seconds, f_sample, window_width_seconds=0.25
+):
+    start_index_cll = 0
+    end_index_cll = round((offset_stim_seconds) * f_sample)
+    start_index_ll = round((-0.6 + offset_stim_seconds) * f_sample)
+    end_index_ll = round((-0.1 + offset_stim_seconds) * f_sample)
+
+    cont_ll = calculate_continuous_line_length(
+        data=data,
+        start_index=start_index_cll,
+        end_index=end_index_cll,
+        window_width_indices=round(window_width_seconds * f_sample),
+        f_sample=f_sample,
+    )  # shape: (n_intensities, [n_replications], n_response_channels, n_time)
+
+    baseline_ll = np.nanmean(
+        cont_ll[..., start_index_ll:end_index_ll], axis=-1
+    )  # shape: (n_intensities, [n_replications], n_response_channels)
+    # baseline_ll = np.nanmedian(
+    #    cont_ll[..., start_index_ll:end_index_ll], axis=-1
+    # )  # shape: (n_intensities, [n_replications], n_response_channels)
+
+    return baseline_ll
+
+
 def calculate_stimulation_response_curves(
     stimlist: pd.DataFrame,
     response_loader: MultipleHDFResponseLoader,  # for legacy Python, change back to if Python updated on Ubelix: HDFResponseLoader | MultipleHDFResponseLoader,
@@ -197,8 +228,8 @@ def calculate_stimulation_response_curves(
     protocol: str = "CR",
     no_traces: bool = False,
     exclude_responses: bool = False,
+    window_width_seconds: float = 0.25,
 ):
-    #### FIXME calculates avg LL with average first
     assert len(selected_channel_paths) > 0
 
     ll_values = []
@@ -251,13 +282,16 @@ def calculate_stimulation_response_curves(
 
         # calculate ll on single trial basis
         single_ll = calculate_pointwise_line_length_max(
-            data=res, offset_stim_seconds=1, f_sample=response_loader.f_sample
+            data=res,
+            offset_stim_seconds=1,
+            f_sample=response_loader.f_sample,
+            window_width_seconds=window_width_seconds,
         )
         ll_values.append(single_ll)
 
     max_replications = np.max(n_replications_list)
 
-    # 0mA componen
+    # 0mA component
     if selected_intensities[0] == 0:
         # pick max_replication stimulations
         subset_io_stimlist = io_stimlist.sample(
@@ -383,6 +417,7 @@ def calculate_upper_bounds_using_surrogates_auc(
     out_file_name: str = None,
     use_cache: bool = False,
     ll_first: bool = True,
+    baseline_correction: bool = False,
 ):
     """
     Calculates lower bound for significance of responses.
@@ -431,6 +466,7 @@ def calculate_upper_bounds_using_surrogates_auc(
                 n_replications,
                 n_intensities,
                 ll_first,
+                baseline_correction,
             )
             for i in range(n_surrogates)
         ]
@@ -554,6 +590,7 @@ def _upper_bounds_var_worker(args):
         n_replications,
         n_intensities,
         ll_first,
+        baseline_correction,
     ) = args
     mrl = MultipleHDFResponseLoader(**response_loader_args)
 
@@ -569,7 +606,8 @@ def _upper_bounds_var_worker(args):
         recording_index = recording_indices[random_idx]
         time = times[random_idx]
         duration = durations[random_idx]
-        random_offsets = np.random.uniform(0, duration, size=n_replications)
+        # assumes that minimal duration is > 2s
+        random_offsets = np.random.uniform(1, duration - 1, size=n_replications)
         random_times = random_offsets + time
         # TODO check annotations/time_grades
 
@@ -587,6 +625,15 @@ def _upper_bounds_var_worker(args):
                 offset_stim_seconds=1,
                 f_sample=mrl.f_sample,
             )
+
+            if baseline_correction:
+                baseline_ll = calculate_ll_baseline(
+                    data=data,
+                    offset_stim_seconds=1,
+                    f_sample=mrl.f_sample,
+                )  # shape: (n_replications, n_response_channel_paths)
+                single_ll = single_ll - baseline_ll
+
             ll_intensities.append(single_ll)
         else:
             avg_data = np.nanmean(
@@ -596,7 +643,16 @@ def _upper_bounds_var_worker(args):
                 data=avg_data,
                 offset_stim_seconds=1,
                 f_sample=mrl.f_sample,
-            )  # (n_channel_paths)
+            )  # (n_response_channel_paths)
+
+            if baseline_correction:
+                baseline_ll = calculate_ll_baseline(
+                    data=avg_data,
+                    offset_stim_seconds=1,
+                    f_sample=mrl.f_sample,
+                )  # shape: (n_response_channel_paths)
+                single_ll = single_ll - baseline_ll
+
             ll_intensities.append(single_ll)
     return ll_intensities
 
@@ -641,6 +697,74 @@ def get_sleep_score_matrix(id_matrix: np.ndarray, logs: pd.DataFrame):
 
 def calculate_excitability_index():
     pass  # TODO
+
+
+def fallback_fit_curve(
+    main_curve: Curve,
+    fallback_curve: Curve,
+    x: np.ndarray,
+    y: np.ndarray,
+    loss: str = None,
+    max_iterations: int = 5000,
+    main_initial_values: list = None,
+):
+    try:
+        params, full_nfev = fit_curve(
+            curve_function=main_curve["function"],
+            x=x,
+            y=y,
+            initial_values=main_curve["initial_values"],
+            bounds=main_curve["bounds"],
+            loss=loss,
+            full_output=True,
+            max_iterations=max_iterations,
+        )
+        return params, full_nfev
+    except Exception:
+        # Use fall back curve to calculate better initial values
+        try:
+            fallback_params, nfev_fallback = fit_curve(
+                curve_function=fallback_curve["function"],
+                x=x,
+                y=y,
+                initial_values=fallback_curve["initial_values"],
+                bounds=fallback_curve["bounds"],
+                loss=loss,
+                full_output=True,
+                max_iterations=max_iterations,
+            )
+            improved_initial_values = []
+            for param_name in main_curve["param_names"]:
+                if param_name in fallback_curve["param_names"]:
+                    # take from fallback if available
+                    index = fallback_curve["param_names"].index(param_name)
+                    improved_initial_values.append(fallback_params[index])
+                else:
+                    # take static value from main curve if not available in fallback
+                    index = main_curve["param_names"].index(param_name)
+                    if main_initial_values is not None:
+                        improved_initial_values.append(main_initial_values[param_name])
+                    else:
+                        improved_initial_values.append(
+                            main_curve["initial_values"][index]
+                        )
+            params, nfev = fit_curve(
+                curve_function=main_curve["function"],
+                x=x,
+                y=y,
+                initial_values=improved_initial_values,
+                bounds=main_curve["bounds"],
+                loss=loss,
+                full_output=True,
+                max_iterations=max_iterations,
+            )
+            print("Info: Fallback fitting succeeded.")
+            nfev = nfev + nfev_fallback
+            return params, nfev
+
+        except Exception as fallback_e:
+            print("Warning: Fallback fitting also failed.")
+            raise fallback_e
 
 
 def fit_curve(
@@ -796,7 +920,7 @@ def _bootstrap_curve_fitting_worker(args):
             max_iterations=max_optimizer_iterations,
         )
         return params
-    except RuntimeError as e:
+    except Exception as e:
         # print(f"Warning in bootstrap iteration {i}: {e}")
         return None
 
@@ -815,6 +939,7 @@ def subset_bootstrap_curve_fitting(
     normalize: bool = False,
     shared_normalization_min: float = None,
     shared_normalization_max: float = None,
+    with_replacement: bool = True,
 ):
     rng_seed = np.random.randint(0, 1_000_000)
 
@@ -834,6 +959,7 @@ def subset_bootstrap_curve_fitting(
                 normalize,
                 shared_normalization_min,
                 shared_normalization_max,
+                with_replacement,
             )
             for i in range(n_bootstrap)
         ]
@@ -858,6 +984,7 @@ def subset_bootstrap_curve_fitting(
                 normalize,
                 shared_normalization_min,
                 shared_normalization_max,
+                with_replacement,
             )
             res = _subset_bootstrap_curve_fitting_worker(args)
             if res is not None:
@@ -881,6 +1008,7 @@ def _subset_bootstrap_curve_fitting_worker(args):
         normalize,
         shared_normalization_min,
         shared_normalization_max,
+        with_replacement,
     ) = args
 
     np.random.seed(rng_seed + i)
@@ -896,9 +1024,9 @@ def _subset_bootstrap_curve_fitting_worker(args):
             y_boot_list.append(np.full(n_subset_replications, 0))
             continue
 
-        selected_indices = np.random.choice(  # FIXME
-            valid_indices, size=n_subset_replications, replace=True
-        )  # replacement is False, we do "Subsampling" here
+        selected_indices = np.random.choice(
+            valid_indices, size=n_subset_replications, replace=with_replacement
+        )  # replacement is False, we do "Subsampling" here, otherwise "Subset Bootstrap"
 
         y_boot_list.append(y[intensity_index, selected_indices])
 
@@ -923,7 +1051,7 @@ def _subset_bootstrap_curve_fitting_worker(args):
             max_iterations=max_optimizer_iterations,
         )
         return params
-    except RuntimeError as e:
+    except Exception as e:
         # print(f"Warning in bootstrap iteration {i}: {e}")
         return None
 
@@ -1423,6 +1551,8 @@ def find_max_n_replications(
 
     if stim_protocol == "CR_IO":
         group_by = ["Int_prob", "name_pos", "name_neg"]
+    elif stim_protocol == "Ph_IO":
+        group_by = ["Int_prob", "name_pos", "name_neg"]
     else:
         print("Warning: Unknown stimulation protocol. Using default grouping.")
         group_by = ["name_pos", "name_neg"]
@@ -1444,6 +1574,10 @@ def calculate_model_performance(y, y_pred, num_params):
 
     # source: https://en.wikipedia.org/wiki/Akaike_information_criterion#Comparison_with_least_squares
     delta_aic = 2 * num_params + n_dp * np.log(sum_squared_residuals / n_dp)
+    delta_aicc = delta_aic + (2 * num_params * (num_params + 1)) / (
+        n_dp - num_params - 1
+    )
+    delta_bic = num_params * np.log(n_dp) + n_dp * np.log(sum_squared_residuals / n_dp)
 
     mae = np.mean(np.abs(y - y_pred))
 
@@ -1457,6 +1591,8 @@ def calculate_model_performance(y, y_pred, num_params):
         "MAPE": mape,
         "sMAPE": smape,
         "dAIC": delta_aic,
+        "dAICc": delta_aicc,
+        "dBIC": delta_bic,
     }
 
 
@@ -1529,7 +1665,7 @@ def calculate_woi_start_indices(
     return woi_start_indices
 
 
-def calculate_peak_latency_1(
+def calculate_peak_latency_1(  # @deprecated
     traces: np.ndarray, offset_stim_seconds: int, f_sample: int
 ):
     sos_bandpass = scipy.signal.butter(
@@ -1647,80 +1783,70 @@ def calculate_peak_latency_1(
 
 
 def calculate_peak_latency(traces: np.ndarray, offset_stim_seconds: int, f_sample: int):
-    # traces shape: (n_intensities, n_replications, n_channels, n_time)
+    # based on EvM + David et al., 2023
+    # traces shape: (n_intensities, n_replications, [n_channels], n_time)
+    if traces.ndim == 3:
+        # add a singleton channel axis in the middle
+        traces = traces[:, :, np.newaxis, :]
 
     sos_bandpass = scipy.signal.butter(
         4, [45], fs=f_sample, btype="lowpass", output="sos"
     )
-    traces = scipy.signal.sosfiltfilt(sos_bandpass, traces, axis=3)
+    traces = scipy.signal.sosfiltfilt(sos_bandpass, traces, axis=-1)
     # TODO is WOI necessary? YES
 
     # 1. baseline correct single trials
     baseline_period = [
-        round((offset_stim_seconds - 0.5) * f_sample),
-        int((offset_stim_seconds - 0.00) * f_sample),
+        round((offset_stim_seconds - 0.6) * f_sample),  # EvM uses -0.5, 0
+        int((offset_stim_seconds - 0.1) * f_sample),
     ]
     baseline_median = np.median(
-        traces[:, :, :, baseline_period[0] : baseline_period[1]], axis=3
+        traces[..., baseline_period[0] : baseline_period[1]], axis=-1
     )[
         ..., np.newaxis
     ]  # shape (n_intensities, n_replications, n_channels, 1)
     baseline_corrected_traces = traces - baseline_median
 
     # 2. average signal
-    avg_traces = np.mean(
-        baseline_corrected_traces, axis=1
-    )  # shape (n_intensities, n_channels, n_time)
+    reshaped = baseline_corrected_traces.reshape(
+        -1,  # combined intensities and replications
+        baseline_corrected_traces.shape[2],  # n_channels
+        baseline_corrected_traces.shape[3],  # n_time
+    )
+    avg_traces = scipy.stats.trim_mean(
+        reshaped, axis=0, proportiontocut=0.1
+    )  # shape (n_channels, n_time) # TODO here we also average across intensities
 
-    # 3. baseline correct mean signal
-    baseline_avg_median = np.median(
-        avg_traces[:, :, baseline_period[0] : baseline_period[1]], axis=2
+    # 3. Baseline correction: subtract baseline mean and z-score with respect to baseline
+    baseline_avg_mean = scipy.stats.trim_mean(
+        avg_traces[:, baseline_period[0] : baseline_period[1]],
+        axis=1,
+        proportiontocut=0.1,
     )[
         ..., np.newaxis
-    ]  # shape (n_intensities, n_channels, 1)
-    baseline_corrected_avg_traces = avg_traces - baseline_avg_median
-
-    # 4. calculate baseline std
-    baseline_std = np.std(
-        baseline_corrected_avg_traces[:, :, baseline_period[0] : baseline_period[1]],
-        axis=2,
-    )  # shape (n_intensities, n_channels)
-
-    # 5. set everything before stim to a constant value
-    # TODO EvM used stim time + 10ms
-    baseline_corrected_avg_traces[
-        :, :, : int((offset_stim_seconds - 0.00) * f_sample)
-    ] = (
-        baseline_corrected_avg_traces[:, :, int((offset_stim_seconds - 0.0) * f_sample)]
+    ]  # shape (n_channels, 1)
+    baseline_avg_std = np.std(
+        avg_traces[:, baseline_period[0] : baseline_period[1]], axis=1
     )[
         ..., np.newaxis
-    ]
+    ]  # shape (n_channels, 1)
 
-    n_intensities = baseline_corrected_avg_traces.shape[0]
-    n_channels = baseline_corrected_avg_traces.shape[1]
-    peaks_positive = [
-        [
-            scipy.signal.find_peaks(
-                baseline_corrected_avg_traces[a, b, :],
-                prominence=baseline_std[a, b],
-            )[0]
-            for b in range(n_channels)
-        ]
-        for a in range(n_intensities)
-    ]
-    peaks_positive = np.array(peaks_positive, dtype=object)
+    z_scored_avg_traces = (avg_traces - baseline_avg_mean) / baseline_avg_std
 
-    peaks_negative = [
-        [
-            scipy.signal.find_peaks(
-                -baseline_corrected_avg_traces[a, b, :],
-                prominence=baseline_std[a, b],
-            )[0]
-            for b in range(n_channels)
-        ]
-        for a in range(n_intensities)
-    ]
-    peaks_negative = np.array(peaks_negative, dtype=object)
+    threshold = 5
+
+    n_channels = z_scored_avg_traces.shape[0]
+    peaks_positive = np.empty(n_channels, dtype=object)
+    for a in range(n_channels):
+        peaks_positive[a] = scipy.signal.find_peaks(
+            z_scored_avg_traces[a, :], height=threshold
+        )[0]
+
+    peaks_negative = np.empty(n_channels, dtype=object)
+    for a in range(n_channels):
+        peaks_negative[a] = scipy.signal.find_peaks(
+            -z_scored_avg_traces[a, :], height=threshold
+        )[0]
 
     peaks = np.vectorize(lambda p, n: np.concatenate([p, n]), otypes=[object])(
         peaks_positive,
@@ -1737,78 +1863,57 @@ def calculate_peak_latency(traces: np.ndarray, offset_stim_seconds: int, f_sampl
         polarity_atlas_positive, polarity_atlas_negative
     )
 
+    # Sort peaks + polarity atlas consistently
+    sorted_peaks, sorted_polarity_atlas = np.vectorize(
+        lambda p, pol: (np.array(p)[np.argsort(p)], np.array(pol)[np.argsort(p)]),
+        otypes=[object, object],
+    )(peaks, polarity_atlas)
+
+    # Take first peak after stim time
+    target_start = round((offset_stim_seconds) * f_sample)
+    target_end = round((offset_stim_seconds + 0.5) * f_sample)
+
+    # FIXME
+    # here we need to restrict to valid part
     # function to reduce one array of peaks to the closest value
-    target = round(offset_stim_seconds * f_sample)
+    def first_peak_in(peaks, target_start, target_end):
+        peaks = np.asarray(peaks)
+        mask = (peaks > target_start) & (peaks < target_end)
+        if np.any(mask):
+            return peaks[np.argmax(mask)]  # first True → first peak > target
+        else:
+            return -1  # or np.nan, if no peak is bigger
 
-    def closest_peak(arr, arr_to_pick):
-        return arr_to_pick[np.abs(arr - target).argmin()] if arr.size > 0 else -1
+    peak_indices = np.vectorize(
+        lambda p: first_peak_in(p, target_start=target_start, target_end=target_end),
+        otypes=[object],
+    )(sorted_peaks)
+    peak_times = np.vectorize(
+        lambda idx: (idx / f_sample) - offset_stim_seconds if idx != -1 else -1,
+        otypes=[object],
+    )(peak_indices)
+    peak_polarities = np.vectorize(
+        lambda p, pol: (
+            pol[
+                np.where(
+                    p
+                    == first_peak_in(
+                        p, target_start=target_start, target_end=target_end
+                    )
+                )[0][0]
+            ]
+            if first_peak_in(p, target_start=target_start, target_end=target_end) != -1
+            else 0
+        ),
+        otypes=[object],
+    )(sorted_peaks, sorted_polarity_atlas)
 
-    # apply across all cells
-    closest_peaks = np.vectorize(closest_peak)(peaks, peaks)
-    closest_polarities = np.vectorize(closest_peak)(peaks, polarity_atlas)
+    if peak_polarities.shape[0] == 1:
+        peak_polarities = np.squeeze(peak_polarities, axis=0)
+        peak_times = np.squeeze(peak_times, axis=0)
+        z_scored_avg_traces = np.squeeze(z_scored_avg_traces, axis=0)
 
-    peak_latencies = closest_peaks / f_sample - offset_stim_seconds
-    print(baseline_corrected_avg_traces.shape)
-    return peak_latencies, baseline_corrected_avg_traces
-
-    # time = np.arange(baseline_corrected_avg_traces.shape[2])
-    # for i in range(4):
-    #     plt.plot(time, baseline_corrected_avg_traces[i + 10, 8])
-    #     plt.scatter(
-    #         time[closest_peaks[i + 10, 8]],
-    #         baseline_corrected_avg_traces[i + 10, 8][closest_peaks[i + 10, 8]],
-    #     )
-    #     plt.title(closest_polarities[i + 10, 8])
-
-    # woi_start_indices = calculate_woi_start_indices(
-
-    # )
-
-    # From EvM
-    # BL_period = [int((t0 - 0.5) * Fs), int((t0 - 0.00) * Fs)]
-    # bl_median = np.median(trials[:, BL_period[0]:BL_period[1]], axis=1)
-    # trials = ff.lp_filter(trials, 45, Fs)
-    # trials = trials - bl_median[:, None]
-
-    # # 2. Average signal
-    # mean_signal = np.mean(trials, axis=0)
-
-    # # 3. Subtract BL median
-    # mean_signal = mean_signal - np.median(mean_signal[BL_period[0]:BL_period[1]])
-
-    # # 4. Calculate standard deviation of baseline period
-    # std = np.std(mean_signal[BL_period[0]:BL_period[1]])
-    # # 5. Threshold: +/- 3.4 std, find first peak crossing this threshold
-    # get_peak_check = 1
-    # factor = 1
-    # mean_signal[:int((t0 + 0.010) * Fs)] = mean_signal[int((t0 + 0.010) * Fs)]
-    # # mean_signal[int((t0 + WOI + 2 * w_LL / 3) * Fs)] = 0
-
-    # first_peak = None
-
-    # threshold = 1 * std
-    # if polarity == 1:
-    #     peaks, _ = find_peaks(mean_signal, prominence=threshold)
-    # else:
-    #     peaks, _ = find_peaks(-mean_signal, prominence=threshold)
-
-    # if peaks.size > 0:
-    #     # find closest peak to peak_lat_general
-    #     peak_lat_general_datapoint = (t0 + peak_lat_general) * Fs
-    #     first_peak = peaks[np.argmin(np.abs(peaks - peak_lat_general_datapoint))]
-    #     peak_detected = 1
-    # else:
-    #     min_thr = np.max([peak_lat_general - 0.03, 0.005])
-    #     mean_signal[:int((t0 + min_thr) * Fs)] = 0
-    #     mean_signal[int((t0 + peak_lat_general + 0.03) * Fs):] = 0
-    #     first_peak = np.argmax(polarity*mean_signal)
-    #     peak_detected = 0
-
-    # return first_peak / Fs - t0, peak_detected
-
-
-def calcualte_stimulation_onsets():
-    pass
+    return peak_times, peak_polarities, z_scored_avg_traces
 
 
 def significant_exi_difference_testing(
@@ -1820,6 +1925,7 @@ def significant_exi_difference_testing(
     ax: plt.Axes = None,
     parallelize=False,
     max_iterations=1000,
+    return_null_distributions=False,
 ):
     assert norm_ll_values_1.shape == norm_ll_values_2.shape
     n_replications = norm_ll_values_1.shape[1]
@@ -1844,6 +1950,10 @@ def significant_exi_difference_testing(
             )
             for i in range(n_surrogates)
         ]
+
+        # results = Parallel(n_jobs=-1, backend="threading")(
+        #     delayed(_significant_exi_difference_testing)(args) for args in args_list
+        # )
 
         with mp.Pool(mp.cpu_count()) as pool:
             results = pool.map(_significant_exi_difference_testing, args_list)
@@ -1890,7 +2000,7 @@ def significant_exi_difference_testing(
                 # TODO add r_squared requirement
 
                 delta_exis_null.append(np.abs(exi_1 - exi_2))
-            except RuntimeError as e:
+            except Exception as e:
                 pass
 
             delta_empirical_exis_null.append(np.abs(empirical_exi_1 - empirical_exi_2))
@@ -1953,14 +2063,17 @@ def significant_exi_difference_testing(
                 alpha=0.4,
                 edgecolor="#088F8F",
                 bins=bins,
-                label="$\\Delta$ExI null distr.",
+                label="$\\Delta$ExI null",
             )
             ax.axvline(actual_delta_exi, color="black", label="$\\Delta$ExI")
 
     except Exception as e:
         surrogate_p_value = np.nan
 
-    return surrogate_p_value_empirical, surrogate_p_value
+    if return_null_distributions:
+        return delta_empirical_exis_null, delta_exis_null
+    else:
+        return surrogate_p_value_empirical, surrogate_p_value
 
 
 def _significant_exi_difference_testing(args):
@@ -2018,7 +2131,7 @@ def _significant_exi_difference_testing(args):
         exi_1 = np.trapezoid(y_fit_1, x_fit)
         exi_2 = np.trapezoid(y_fit_2, x_fit)
         # TODO add r_squared requirement
-    except RuntimeError as e:
+    except Exception as e:
         exi_1 = np.nan
         exi_2 = np.nan
 
@@ -2033,6 +2146,7 @@ def find_params_for_given_effect_size(
     x,
     precision,
     max_iterations=10000,
+    is_reciprocal=True,
 ):
     # selected param should be monotonic param to make bisection algorithm work
 
@@ -2047,10 +2161,12 @@ def find_params_for_given_effect_size(
 
         current_y_fit = curve["function"](x, *adj_params)
         current_exi = np.trapezoid(current_y_fit, x)
-        if current_exi > target_exi:
-            lo = mid
-        else:
+        if (not is_reciprocal and (current_exi > target_exi)) or (
+            is_reciprocal and (current_exi < target_exi)
+        ):
             hi = mid
+        else:
+            lo = mid
 
         iter += 1
         if iter > max_iterations:
